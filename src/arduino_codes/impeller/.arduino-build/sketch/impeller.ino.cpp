@@ -1,0 +1,787 @@
+#include <Arduino.h>
+#line 1 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+/*
+  Closed-loop impeller RPM controller for Arduino UNO.
+
+  Pin plan:
+    Encoder channel A -> D2 / INT0
+    Encoder channel B -> D3 / INT1
+    Timer1 OC1A PWM pulse output -> D9
+
+  Serial control at 115200 baud:
+    T<rpm>  Set integer target RPM. T0 stops the motor.
+    P<kp>   Set PID proportional gain.
+    I<ki>   Set PID integral gain.
+    D<kd>   Set PID derivative gain.
+    S0      Stop the motor.
+    ?       Print current status.
+
+  The PWM safety boundary is enforced on Arduino:
+    - High pulse width is clamped between MIN_PULSE_WIDTH_NS and MAX_PULSE_WIDTH_NS.
+    - Effective duty is clamped to the measured original impeller range.
+*/
+
+#include <util/atomic.h>
+
+const uint8_t ENCODER_A_PIN = 2;
+const uint8_t ENCODER_B_PIN = 3;
+const uint8_t MOTOR_PWM_PIN = 9;  // Arduino UNO PB1 / OC1A
+
+const float COUNTS_PER_REVOLUTION = 500.0f;
+
+// After running calibration.py, copy the generated calibration constants here before uploading.
+const uint8_t RPM_CALIB_POINT_COUNT = 10;
+const float RPM_CALIB_MEASURED[RPM_CALIB_POINT_COUNT] = {
+  74.250f, 277.000f, 332.625f, 409.875f, 511.250f,
+  539.750f, 601.625f, 687.250f, 737.750f, 759.000f
+};
+const float RPM_CALIB_REFERENCE[RPM_CALIB_POINT_COUNT] = {
+  50.000f, 250.000f, 300.000f, 350.000f, 400.000f,
+  450.000f, 500.000f, 750.000f, 1000.000f, 1000.000f
+};
+
+const uint16_t MAX_TARGET_RPM = 1200;
+
+const unsigned long RPM_SAMPLE_INTERVAL_MS = 500UL;
+const unsigned long RPM_CALC_WINDOW_MS = 1500UL;
+const uint8_t RPM_HISTORY_SIZE = 8;
+const float RPM_EMA_ALPHA = 0.5f;
+const unsigned long PID_INTERVAL_MS = 100UL;
+const unsigned long STATUS_INTERVAL_MS = 500UL;
+
+const float DEFAULT_PID_KP = 0.076f;
+const float DEFAULT_PID_KI = 0.023f;
+const float DEFAULT_PID_KD = 0.00f;
+const float MAX_PID_KP = 1.0f;
+const float MAX_PID_KI = 1.0f;
+const float MAX_PID_KD = 1.0f;
+const float PID_INTEGRAL_LIMIT = 2000.0f;
+const float PID_OUTPUT_RISE_LIMIT_PER_SECOND = 5.0f;
+
+const uint16_t MIN_PULSE_WIDTH_NS = 300;
+const uint16_t MAX_PULSE_WIDTH_NS = 3500;
+const uint32_t NOMINAL_PWM_PERIOD_NS = 50000UL;
+
+// Update this after measuring the original impeller at its minimum RPM.
+// The default makes 1% output roughly 1% of the safe maximum with a 300 ns pulse.
+const uint32_t REST_US_AT_STRENGTH_1 = 8000UL;
+
+const uint32_t MIN_EFFECTIVE_DUTY_PPM = 6000UL;
+const uint32_t MAX_EFFECTIVE_DUTY_PPM = 70000UL;
+const uint32_t STRENGTH_SCALE = 100000UL;  // 100.000%
+
+const uint16_t MIN_PULSE_TICKS = (uint16_t)(((uint32_t)MIN_PULSE_WIDTH_NS * 2UL + 124UL) / 125UL);
+const uint16_t MAX_PULSE_TICKS = (uint16_t)(((uint32_t)MAX_PULSE_WIDTH_NS * 2UL + 124UL) / 125UL);
+
+volatile long encoderCount = 0;
+volatile uint8_t lastEncoderState = 0;
+
+unsigned long lastRpmSampleMs = 0;
+unsigned long lastPidMs = 0;
+unsigned long lastStatusMs = 0;
+
+unsigned long countSampleTimes[RPM_HISTORY_SIZE];
+long countSamples[RPM_HISTORY_SIZE];
+uint8_t countSampleIndex = 0;
+uint8_t countSampleCount = 0;
+
+float rpmRaw = 0.0f;
+float rpmMeasured = 0.0f;
+bool rpmMeasuredReady = false;
+uint16_t targetRpm = 0;
+float pidIntegral = 0.0f;
+float lastError = 0.0f;
+float pidOutput = 0.0f;
+float pidKp = DEFAULT_PID_KP;
+float pidKi = DEFAULT_PID_KI;
+float pidKd = DEFAULT_PID_KD;
+
+uint32_t pwmStrengthMilliPercent = 0;
+uint16_t configuredPulseTicks = MIN_PULSE_TICKS;
+uint16_t configuredPeriodTicks = 0;
+uint32_t configuredPulseNs = 0;
+uint32_t configuredRestUs = REST_US_AT_STRENGTH_1;
+uint32_t configuredPeriodUs = REST_US_AT_STRENGTH_1;
+uint32_t configuredDutyPpm = 0;
+bool pwmRunning = false;
+
+char commandBuffer[24];
+uint8_t commandLength = 0;
+
+#line 109 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void setup();
+#line 137 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void loop();
+#line 144 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void updateRpm();
+#line 174 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void recordCountSample(unsigned long sampleMs, long count);
+#line 184 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void calculateWindowDelta(unsigned long now, long currentCount, unsigned long *elapsedMs, long *delta);
+#line 215 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+float smoothRpm(float rpm);
+#line 224 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+float calibrateRpm(float measuredRpm);
+#line 269 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+float interpolateRpm(float measuredRpm, float measuredLow, float referenceLow, float measuredHigh, float referenceHigh);
+#line 279 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void updatePid();
+#line 319 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void readSerialCommands();
+#line 338 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void processCommand(char *command);
+#line 384 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+bool parseNonNegativeInteger(char *text, uint16_t *value);
+#line 406 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void processPidGainCommand(char *text, char gainName, float maxValue);
+#line 417 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+bool parseNonNegativeFloat(char *text, float *value);
+#line 443 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void setTargetRpm(uint16_t value);
+#line 454 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void setPidGain(char gainName, float value);
+#line 467 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void applyPwmStrength(uint32_t value);
+#line 496 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+uint16_t pulseTicksForStrength(uint32_t value);
+#line 508 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+uint16_t pulseTicksForDuty(uint32_t dutyPpm);
+#line 524 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+uint32_t dutyPpmForStrength(uint32_t value);
+#line 541 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+uint16_t periodTicksForDuty(uint16_t pulseTicks, uint32_t dutyPpm);
+#line 559 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+uint32_t ticksToNanoseconds(uint16_t ticks);
+#line 563 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+uint32_t ticksToMicroseconds(uint16_t ticks);
+#line 567 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+uint32_t constrainStrength(uint32_t value);
+#line 575 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void printMilliPercent(uint32_t value);
+#line 589 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void printRoundedRpm(float rpm);
+#line 598 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void startFastPwm(uint16_t highTicks, uint16_t periodTicks);
+#line 613 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void updateFastPwm(uint16_t highTicks, uint16_t periodTicks);
+#line 627 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void stopMotor();
+#line 637 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void handleEncoderChange();
+#line 652 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+uint8_t readEncoderState();
+#line 660 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+float constrainFloat(float value, float low, float high);
+#line 672 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void printPeriodicStatus();
+#line 682 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void printStatus();
+#line 109 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller\\impeller.ino"
+void setup() {
+  pinMode(ENCODER_A_PIN, INPUT_PULLUP);
+  pinMode(ENCODER_B_PIN, INPUT_PULLUP);
+  pinMode(MOTOR_PWM_PIN, OUTPUT);
+  stopMotor();
+
+  Serial.begin(115200);
+  while (!Serial) {
+    ;  // UNO continues immediately; native USB boards wait for serial.
+  }
+
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    lastEncoderState = readEncoderState();
+  }
+
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A_PIN), handleEncoderChange, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_B_PIN), handleEncoderChange, CHANGE);
+
+  lastRpmSampleMs = millis();
+  recordCountSample(lastRpmSampleMs, 0);
+  lastPidMs = millis();
+  lastStatusMs = millis();
+
+  Serial.println("Impeller PID controller ready.");
+  Serial.println("Encoder: A->D2, B->D3. PWM: D9 / OC1A.");
+  printStatus();
+}
+
+void loop() {
+  readSerialCommands();
+  updateRpm();
+  updatePid();
+  printPeriodicStatus();
+}
+
+void updateRpm() {
+  const unsigned long now = millis();
+  if (now - lastRpmSampleMs < RPM_SAMPLE_INTERVAL_MS) {
+    return;
+  }
+
+  long countSnapshot;
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    countSnapshot = encoderCount;
+  }
+
+  recordCountSample(now, countSnapshot);
+
+  unsigned long elapsedMs = 0;
+  long delta = 0;
+  calculateWindowDelta(now, countSnapshot, &elapsedMs, &delta);
+
+  const float countsPerSecond = elapsedMs > 0 ? (delta * 1000.0f) / elapsedMs : 0.0f;
+  float unscaledRpm = (countsPerSecond * 60.0f) / COUNTS_PER_REVOLUTION;
+
+  if (unscaledRpm < 0.0f) {
+    unscaledRpm = -unscaledRpm;
+  }
+
+  rpmRaw = unscaledRpm > 0.0f ? calibrateRpm(unscaledRpm) : 0.0f;
+  rpmMeasured = smoothRpm(rpmRaw);
+
+  lastRpmSampleMs = now;
+}
+
+void recordCountSample(unsigned long sampleMs, long count) {
+  countSampleTimes[countSampleIndex] = sampleMs;
+  countSamples[countSampleIndex] = count;
+  countSampleIndex = (countSampleIndex + 1) % RPM_HISTORY_SIZE;
+
+  if (countSampleCount < RPM_HISTORY_SIZE) {
+    countSampleCount++;
+  }
+}
+
+void calculateWindowDelta(unsigned long now, long currentCount, unsigned long *elapsedMs, long *delta) {
+  if (countSampleCount < 2) {
+    *elapsedMs = 0;
+    *delta = 0;
+    return;
+  }
+
+  uint8_t newestIndex = (countSampleIndex + RPM_HISTORY_SIZE - 1U) % RPM_HISTORY_SIZE;
+  uint8_t selectedIndex = newestIndex;
+  unsigned long selectedAgeMs = 0;
+
+  for (uint8_t i = 0; i < countSampleCount; i++) {
+    const uint8_t index = (countSampleIndex + RPM_HISTORY_SIZE - 1U - i) % RPM_HISTORY_SIZE;
+    const unsigned long ageMs = now - countSampleTimes[index];
+
+    if (ageMs <= RPM_CALC_WINDOW_MS && ageMs >= selectedAgeMs) {
+      selectedAgeMs = ageMs;
+      selectedIndex = index;
+    }
+  }
+
+  if (selectedIndex == newestIndex || selectedAgeMs == 0) {
+    *elapsedMs = 0;
+    *delta = 0;
+    return;
+  }
+
+  *elapsedMs = selectedAgeMs;
+  *delta = currentCount - countSamples[selectedIndex];
+}
+
+float smoothRpm(float rpm) {
+  if (!rpmMeasuredReady) {
+    rpmMeasuredReady = true;
+    return rpm;
+  }
+
+  return rpmMeasured + (RPM_EMA_ALPHA * (rpm - rpmMeasured));
+}
+
+float calibrateRpm(float measuredRpm) {
+  if (RPM_CALIB_POINT_COUNT == 0) {
+    return measuredRpm;
+  }
+
+  if (RPM_CALIB_POINT_COUNT == 1) {
+    if (RPM_CALIB_MEASURED[0] <= 0.0f) {
+      return measuredRpm;
+    }
+
+    return measuredRpm * (RPM_CALIB_REFERENCE[0] / RPM_CALIB_MEASURED[0]);
+  }
+
+  if (measuredRpm <= RPM_CALIB_MEASURED[0]) {
+    return interpolateRpm(
+      measuredRpm,
+      RPM_CALIB_MEASURED[0],
+      RPM_CALIB_REFERENCE[0],
+      RPM_CALIB_MEASURED[1],
+      RPM_CALIB_REFERENCE[1]
+    );
+  }
+
+  for (uint8_t i = 1; i < RPM_CALIB_POINT_COUNT; i++) {
+    if (measuredRpm <= RPM_CALIB_MEASURED[i]) {
+      return interpolateRpm(
+        measuredRpm,
+        RPM_CALIB_MEASURED[i - 1],
+        RPM_CALIB_REFERENCE[i - 1],
+        RPM_CALIB_MEASURED[i],
+        RPM_CALIB_REFERENCE[i]
+      );
+    }
+  }
+
+  const uint8_t last = RPM_CALIB_POINT_COUNT - 1;
+  return interpolateRpm(
+    measuredRpm,
+    RPM_CALIB_MEASURED[last - 1],
+    RPM_CALIB_REFERENCE[last - 1],
+    RPM_CALIB_MEASURED[last],
+    RPM_CALIB_REFERENCE[last]
+  );
+}
+
+float interpolateRpm(float measuredRpm, float measuredLow, float referenceLow, float measuredHigh, float referenceHigh) {
+  const float measuredSpan = measuredHigh - measuredLow;
+  if (measuredSpan == 0.0f) {
+    return referenceLow;
+  }
+
+  const float position = (measuredRpm - measuredLow) / measuredSpan;
+  return referenceLow + (position * (referenceHigh - referenceLow));
+}
+
+void updatePid() {
+  const unsigned long now = millis();
+  if (now - lastPidMs < PID_INTERVAL_MS) {
+    return;
+  }
+
+  const float dt = (now - lastPidMs) / 1000.0f;
+  lastPidMs = now;
+
+  if (targetRpm == 0) {
+    pidIntegral = 0.0f;
+    lastError = 0.0f;
+    pidOutput = 0.0f;
+    applyPwmStrength(0);
+    return;
+  }
+
+  const float error = (float)targetRpm - rpmMeasured;
+  pidIntegral += error * dt;
+  pidIntegral = constrainFloat(pidIntegral, -PID_INTEGRAL_LIMIT, PID_INTEGRAL_LIMIT);
+
+  const float derivative = (error - lastError) / dt;
+  lastError = error;
+
+  const float requestedOutput = constrainFloat(
+    (pidKp * error) + (pidKi * pidIntegral) + (pidKd * derivative),
+    0.0f,
+    100.0f
+  );
+
+  const float maxOutputRise = PID_OUTPUT_RISE_LIMIT_PER_SECOND * dt;
+  if (requestedOutput > pidOutput + maxOutputRise) {
+    pidOutput += maxOutputRise;
+  } else {
+    pidOutput = requestedOutput;
+  }
+
+  applyPwmStrength((uint32_t)(pidOutput * 1000.0f + 0.5f));
+}
+
+void readSerialCommands() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+
+    if (c == '\n' || c == '\r') {
+      if (commandLength > 0) {
+        commandBuffer[commandLength] = '\0';
+        processCommand(commandBuffer);
+        commandLength = 0;
+      }
+    } else if (commandLength < sizeof(commandBuffer) - 1) {
+      commandBuffer[commandLength++] = c;
+    } else {
+      commandLength = 0;
+      Serial.println("ERR command too long");
+    }
+  }
+}
+
+void processCommand(char *command) {
+  if (command[0] == '?') {
+    printStatus();
+    return;
+  }
+
+  if (command[0] == 'T' || command[0] == 't') {
+    uint16_t value;
+    if (!parseNonNegativeInteger(command + 1, &value) || value > MAX_TARGET_RPM) {
+      Serial.println("ERR use T0-T1200");
+      return;
+    }
+
+    setTargetRpm(value);
+    printStatus();
+    return;
+  }
+
+  if (command[0] == 'P' || command[0] == 'p') {
+    processPidGainCommand(command + 1, 'P', MAX_PID_KP);
+    return;
+  }
+
+  if (command[0] == 'I' || command[0] == 'i') {
+    processPidGainCommand(command + 1, 'I', MAX_PID_KI);
+    return;
+  }
+
+  if (command[0] == 'D' || command[0] == 'd') {
+    processPidGainCommand(command + 1, 'D', MAX_PID_KD);
+    return;
+  }
+
+  if (command[0] == 'S' || command[0] == 's') {
+    if (command[1] == '0' && command[2] == '\0') {
+      setTargetRpm(0);
+      printStatus();
+    } else {
+      Serial.println("ERR PID sketch only accepts S0 stop; use T<rpm>");
+    }
+    return;
+  }
+
+  Serial.println("ERR use T<rpm>, P<kp>, I<ki>, D<kd>, S0, or ?");
+}
+
+bool parseNonNegativeInteger(char *text, uint16_t *value) {
+  if (text[0] == '\0') {
+    return false;
+  }
+
+  uint32_t parsed = 0;
+
+  for (uint8_t i = 0; text[i] != '\0'; i++) {
+    if (text[i] < '0' || text[i] > '9') {
+      return false;
+    }
+
+    parsed = (parsed * 10UL) + (uint32_t)(text[i] - '0');
+    if (parsed > 65535UL) {
+      return false;
+    }
+  }
+
+  *value = (uint16_t)parsed;
+  return true;
+}
+
+void processPidGainCommand(char *text, char gainName, float maxValue) {
+  float value;
+  if (!parseNonNegativeFloat(text, &value) || value > maxValue) {
+    Serial.println("ERR PID gain out of range");
+    return;
+  }
+
+  setPidGain(gainName, value);
+  printStatus();
+}
+
+bool parseNonNegativeFloat(char *text, float *value) {
+  if (text[0] == '\0') {
+    return false;
+  }
+
+  bool seenDigit = false;
+  bool seenDot = false;
+
+  for (uint8_t i = 0; text[i] != '\0'; i++) {
+    if (text[i] >= '0' && text[i] <= '9') {
+      seenDigit = true;
+    } else if (text[i] == '.' && !seenDot) {
+      seenDot = true;
+    } else {
+      return false;
+    }
+  }
+
+  if (!seenDigit) {
+    return false;
+  }
+
+  *value = atof(text);
+  return true;
+}
+
+void setTargetRpm(uint16_t value) {
+  targetRpm = value;
+  pidIntegral = 0.0f;
+  lastError = (float)targetRpm - rpmMeasured;
+
+  if (targetRpm == 0) {
+    pidOutput = 0.0f;
+    applyPwmStrength(0);
+  }
+}
+
+void setPidGain(char gainName, float value) {
+  if (gainName == 'P') {
+    pidKp = value;
+  } else if (gainName == 'I') {
+    pidKi = value;
+  } else if (gainName == 'D') {
+    pidKd = value;
+  }
+
+  pidIntegral = 0.0f;
+  lastError = (float)targetRpm - rpmMeasured;
+}
+
+void applyPwmStrength(uint32_t value) {
+  const uint32_t nextStrengthMilliPercent = constrainStrength(value);
+
+  if (nextStrengthMilliPercent == 0) {
+    pwmStrengthMilliPercent = 0;
+    stopMotor();
+    return;
+  }
+
+  const uint16_t nextPulseTicks = pulseTicksForStrength(nextStrengthMilliPercent);
+  const uint32_t nextDutyPpm = dutyPpmForStrength(nextStrengthMilliPercent);
+  const uint16_t nextPeriodTicks = periodTicksForDuty(nextPulseTicks, nextDutyPpm);
+  const bool timingChanged = nextPulseTicks != configuredPulseTicks || nextPeriodTicks != configuredPeriodTicks;
+
+  pwmStrengthMilliPercent = nextStrengthMilliPercent;
+  configuredPulseTicks = nextPulseTicks;
+  configuredPulseNs = ticksToNanoseconds(nextPulseTicks);
+  configuredDutyPpm = nextDutyPpm;
+  configuredPeriodTicks = nextPeriodTicks;
+  configuredPeriodUs = ticksToMicroseconds(nextPeriodTicks);
+  configuredRestUs = ticksToMicroseconds(nextPeriodTicks - nextPulseTicks);
+
+  if (!pwmRunning) {
+    startFastPwm(nextPulseTicks, nextPeriodTicks);
+  } else if (timingChanged) {
+    updateFastPwm(nextPulseTicks, nextPeriodTicks);
+  }
+}
+
+uint16_t pulseTicksForStrength(uint32_t value) {
+  if (value <= 1000UL) {
+    return MIN_PULSE_TICKS;
+  }
+
+  if (value >= STRENGTH_SCALE) {
+    return MAX_PULSE_TICKS;
+  }
+
+  return pulseTicksForDuty(dutyPpmForStrength(value));
+}
+
+uint16_t pulseTicksForDuty(uint32_t dutyPpm) {
+  const uint64_t numerator = (uint64_t)NOMINAL_PWM_PERIOD_NS * dutyPpm * 2ULL;
+  const uint64_t denominator = 1000000ULL * 125ULL;
+  uint16_t ticks = (uint16_t)((numerator + denominator - 1ULL) / denominator);
+
+  if (ticks < MIN_PULSE_TICKS) {
+    return MIN_PULSE_TICKS;
+  }
+
+  if (ticks > MAX_PULSE_TICKS) {
+    return MAX_PULSE_TICKS;
+  }
+
+  return ticks;
+}
+
+uint32_t dutyPpmForStrength(uint32_t value) {
+  if (value == 0) {
+    return 0;
+  }
+
+  if (value <= 1000UL) {
+    return MIN_EFFECTIVE_DUTY_PPM;
+  }
+
+  if (value >= STRENGTH_SCALE) {
+    return MAX_EFFECTIVE_DUTY_PPM;
+  }
+
+  return MIN_EFFECTIVE_DUTY_PPM +
+    (uint32_t)(((uint64_t)(MAX_EFFECTIVE_DUTY_PPM - MIN_EFFECTIVE_DUTY_PPM) * (value - 1000UL)) / 99000ULL);
+}
+
+uint16_t periodTicksForDuty(uint16_t pulseTicks, uint32_t dutyPpm) {
+  if (dutyPpm == 0) {
+    return pulseTicks + 1;
+  }
+
+  uint32_t periodTicks = (uint32_t)((((uint64_t)pulseTicks * 1000000ULL) + dutyPpm - 1ULL) / dutyPpm);
+
+  if (periodTicks <= pulseTicks) {
+    periodTicks = pulseTicks + 1;
+  }
+
+  if (periodTicks > 65535UL) {
+    return 65535;
+  }
+
+  return (uint16_t)periodTicks;
+}
+
+uint32_t ticksToNanoseconds(uint16_t ticks) {
+  return ((uint32_t)ticks * 125UL + 1UL) / 2UL;
+}
+
+uint32_t ticksToMicroseconds(uint16_t ticks) {
+  return (((uint32_t)ticks * 125UL) + 1999UL) / 2000UL;
+}
+
+uint32_t constrainStrength(uint32_t value) {
+  if (value > STRENGTH_SCALE) {
+    return STRENGTH_SCALE;
+  }
+
+  return value;
+}
+
+void printMilliPercent(uint32_t value) {
+  Serial.print(value / 1000UL);
+  Serial.print('.');
+
+  const uint16_t fractional = (uint16_t)(value % 1000UL);
+  if (fractional < 100U) {
+    Serial.print('0');
+  }
+  if (fractional < 10U) {
+    Serial.print('0');
+  }
+  Serial.print(fractional);
+}
+
+void printRoundedRpm(float rpm) {
+  if (rpm <= 0.0f) {
+    Serial.print(0);
+    return;
+  }
+
+  Serial.print((uint32_t)(rpm + 0.5f));
+}
+
+void startFastPwm(uint16_t highTicks, uint16_t periodTicks) {
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    TCCR1A = 0;
+    TCCR1B = 0;
+    TCNT1 = 0;
+    ICR1 = periodTicks - 1U;
+    OCR1A = highTicks;
+    TIFR1 = _BV(TOV1) | _BV(OCF1A);
+    TIMSK1 &= ~_BV(TOIE1);
+    TCCR1A = _BV(COM1A1) | _BV(WGM11);
+    TCCR1B = _BV(WGM13) | _BV(WGM12) | _BV(CS10);
+    pwmRunning = true;
+  }
+}
+
+void updateFastPwm(uint16_t highTicks, uint16_t periodTicks) {
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    const uint16_t topTicks = periodTicks - 1U;
+
+    if (TCNT1 >= topTicks) {
+      TCNT1 = 0;
+      TIFR1 = _BV(TOV1) | _BV(OCF1A);
+    }
+
+    ICR1 = topTicks;
+    OCR1A = highTicks;
+  }
+}
+
+void stopMotor() {
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    TCCR1A = 0;
+    TCCR1B = 0;
+    TIMSK1 &= ~_BV(TOIE1);
+    PORTB &= ~_BV(PB1);
+    pwmRunning = false;
+  }
+}
+
+void handleEncoderChange() {
+  const uint8_t currentState = readEncoderState();
+  const uint8_t transition = (lastEncoderState << 2) | currentState;
+
+  static const int8_t quadratureDelta[16] = {
+    0, -1, 1, 0,
+    1, 0, 0, -1,
+    -1, 0, 0, 1,
+    0, 1, -1, 0
+  };
+
+  encoderCount += quadratureDelta[transition];
+  lastEncoderState = currentState;
+}
+
+uint8_t readEncoderState() {
+  const uint8_t portValue = PIND;
+  const uint8_t channelA = (portValue & _BV(PD2)) ? 1 : 0;
+  const uint8_t channelB = (portValue & _BV(PD3)) ? 1 : 0;
+
+  return (channelA << 1) | channelB;
+}
+
+float constrainFloat(float value, float low, float high) {
+  if (value < low) {
+    return low;
+  }
+
+  if (value > high) {
+    return high;
+  }
+
+  return value;
+}
+
+void printPeriodicStatus() {
+  const unsigned long now = millis();
+  if (now - lastStatusMs < STATUS_INTERVAL_MS) {
+    return;
+  }
+
+  lastStatusMs = now;
+  printStatus();
+}
+
+void printStatus() {
+  Serial.print("OK target_rpm=");
+  Serial.print(targetRpm);
+  Serial.print(" measured_rpm=");
+  printRoundedRpm(rpmMeasured);
+  Serial.print(" raw_rpm=");
+  printRoundedRpm(rpmRaw);
+  Serial.print(" output=");
+  Serial.print(pidOutput, 2);
+  Serial.print(" kp=");
+  Serial.print(pidKp, 4);
+  Serial.print(" ki=");
+  Serial.print(pidKi, 4);
+  Serial.print(" kd=");
+  Serial.print(pidKd, 4);
+  Serial.print(" strength=");
+  printMilliPercent(pwmStrengthMilliPercent);
+  Serial.print(" calib_points=");
+  Serial.print(RPM_CALIB_POINT_COUNT);
+  Serial.print(" pulse_ticks=");
+  Serial.print(configuredPulseTicks);
+  Serial.print(" period_ticks=");
+  Serial.print(configuredPeriodTicks);
+  Serial.print(" pulse_ns=");
+  Serial.print(configuredPulseNs);
+  Serial.print(" rest_us=");
+  Serial.print(configuredRestUs);
+  Serial.print(" period_us=");
+  Serial.print(configuredPeriodUs);
+  Serial.print(" duty_ppm=");
+  Serial.print(configuredDutyPpm);
+  Serial.print(" max_duty_ppm=");
+  Serial.println(MAX_EFFECTIVE_DUTY_PPM);
+}
+

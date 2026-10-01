@@ -1,0 +1,8 @@
+min_rpm: 300
+max_rpm: 900
+total_operation_seconds: 180
+min_stop_seconds: 3
+max_stop_seconds: 6
+min_rotation_seconds: 4
+max_rotation_seconds: 10
+sample_interval_seconds: 0.5

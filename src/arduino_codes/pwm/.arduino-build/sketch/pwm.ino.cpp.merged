@@ -1,0 +1,331 @@
+#include <Arduino.h>
+#line 1 "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\pwm\\pwm.ino"
+/*
+  Safe open-loop impeller PWM test for Arduino UNO.
+
+  Pin plan:
+    Timer1 OC1A PWM pulse output -> D9
+
+  Serial control at 115200 baud:
+    S0-S100  Set bounded output request, up to 3 decimal places.
+             S100 is the safe configured maximum.
+    ?        Print current status.
+
+  Safety rules enforced here:
+    - The motor starts stopped.
+    - High pulse width is clamped between MIN_PULSE_WIDTH_NS and MAX_PULSE_WIDTH_NS.
+    - Effective duty is clamped to the measured original impeller range.
+*/
+
+#include <util/atomic.h>
+
+const uint8_t MOTOR_PWM_PIN = 9;  // Arduino UNO PB1 / OC1A
+
+const uint16_t MIN_PULSE_WIDTH_NS = 300;
+const uint16_t MAX_PULSE_WIDTH_NS = 3500;
+const uint32_t NOMINAL_PWM_PERIOD_NS = 50000UL;
+
+// Update this after measuring the original impeller at its minimum RPM.
+// The default makes S1 roughly 1% of the safe maximum with a 300 ns pulse.
+const uint32_t REST_US_AT_STRENGTH_1 = 8000UL;
+
+const uint32_t MIN_EFFECTIVE_DUTY_PPM = 6000UL;
+const uint32_t MAX_EFFECTIVE_DUTY_PPM = 70000UL;
+const uint32_t STRENGTH_SCALE = 100000UL;  // 100.000%
+const unsigned long SERIAL_COMMAND_TIMEOUT_MS = 1500UL;
+
+const uint16_t MIN_PULSE_TICKS = (uint16_t)(((uint32_t)MIN_PULSE_WIDTH_NS * 2UL + 124UL) / 125UL);
+const uint16_t MAX_PULSE_TICKS = (uint16_t)(((uint32_t)MAX_PULSE_WIDTH_NS * 2UL + 124UL) / 125UL);
+
+uint32_t strengthMilliPercent = 0;
+uint16_t configuredPulseTicks = MIN_PULSE_TICKS;
+uint16_t configuredPeriodTicks = 0;
+uint32_t configuredPulseNs = 0;
+uint32_t configuredRestUs = REST_US_AT_STRENGTH_1;
+uint32_t configuredPeriodUs = REST_US_AT_STRENGTH_1;
+uint32_t configuredDutyPpm = 0;
+unsigned long lastCommandMs = 0;
+
+char commandBuffer[16];
+uint8_t commandLength = 0;
+
+void setup() {
+  pinMode(MOTOR_PWM_PIN, OUTPUT);
+  stopMotor();
+
+  Serial.begin(115200);
+  lastCommandMs = millis();
+  Serial.println("Impeller safe Timer1 PWM test ready.");
+  Serial.println("Output pin: D9 / OC1A");
+  printStatus();
+}
+
+void loop() {
+  readSerialCommands();
+  stopOnSerialTimeout();
+}
+
+void readSerialCommands() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+
+    if (c == '\n' || c == '\r') {
+      if (commandLength > 0) {
+        commandBuffer[commandLength] = '\0';
+        processCommand(commandBuffer);
+        commandLength = 0;
+      }
+    } else if (commandLength < sizeof(commandBuffer) - 1) {
+      commandBuffer[commandLength++] = c;
+    } else {
+      commandLength = 0;
+      Serial.println("ERR command too long");
+    }
+  }
+}
+
+void processCommand(char *command) {
+  if (command[0] == '?') {
+    lastCommandMs = millis();
+    printStatus();
+    return;
+  }
+
+  if (command[0] == 'S' || command[0] == 's') {
+    command++;
+  }
+
+  uint32_t value;
+  if (!parseStrengthMilliPercent(command, &value)) {
+    Serial.println("ERR use S0-S100, up to 3 decimals");
+    return;
+  }
+
+  lastCommandMs = millis();
+  applyStrength(value);
+  printStatus();
+}
+
+void stopOnSerialTimeout() {
+  if (strengthMilliPercent == 0) {
+    return;
+  }
+
+  const unsigned long now = millis();
+  if (now - lastCommandMs <= SERIAL_COMMAND_TIMEOUT_MS) {
+    return;
+  }
+
+  applyStrength(0);
+  Serial.println("WARN serial timeout stopped PWM");
+}
+
+bool parseStrengthMilliPercent(char *text, uint32_t *value) {
+  if (text[0] == '\0') {
+    return false;
+  }
+
+  uint32_t whole = 0;
+  uint16_t fractional = 0;
+  uint8_t fractionalDigits = 0;
+  bool seenDigit = false;
+  bool seenDot = false;
+
+  for (uint8_t i = 0; text[i] != '\0'; i++) {
+    const char c = text[i];
+
+    if (c >= '0' && c <= '9') {
+      seenDigit = true;
+
+      if (seenDot) {
+        if (fractionalDigits >= 3) {
+          return false;
+        }
+
+        fractional = (uint16_t)(fractional * 10U + (c - '0'));
+        fractionalDigits++;
+      } else {
+        whole = whole * 10UL + (uint32_t)(c - '0');
+        if (whole > 100UL) {
+          return false;
+        }
+      }
+    } else if (c == '.' && !seenDot) {
+      seenDot = true;
+    } else {
+      return false;
+    }
+  }
+
+  if (!seenDigit) {
+    return false;
+  }
+
+  while (fractionalDigits < 3) {
+    fractional = (uint16_t)(fractional * 10U);
+    fractionalDigits++;
+  }
+
+  *value = whole * 1000UL + fractional;
+  return *value <= STRENGTH_SCALE;
+}
+
+void applyStrength(uint32_t value) {
+  strengthMilliPercent = constrainStrength(value);
+
+  if (strengthMilliPercent == 0) {
+    stopMotor();
+    configuredPeriodTicks = 0;
+    configuredPulseNs = 0;
+    configuredDutyPpm = 0;
+    configuredRestUs = REST_US_AT_STRENGTH_1;
+    configuredPeriodUs = REST_US_AT_STRENGTH_1;
+    return;
+  }
+
+  configuredPulseTicks = pulseTicksForStrength(strengthMilliPercent);
+  configuredPulseNs = ticksToNanoseconds(configuredPulseTicks);
+  configuredDutyPpm = dutyPpmForStrength(strengthMilliPercent);
+  configuredPeriodTicks = periodTicksForDuty(configuredPulseTicks, configuredDutyPpm);
+  configuredPeriodUs = ticksToMicroseconds(configuredPeriodTicks);
+  configuredRestUs = ticksToMicroseconds(configuredPeriodTicks - configuredPulseTicks);
+  startFastPwm(configuredPulseTicks, configuredPeriodTicks);
+}
+
+uint16_t pulseTicksForStrength(uint32_t value) {
+  if (value <= 1000UL) {
+    return MIN_PULSE_TICKS;
+  }
+
+  if (value >= STRENGTH_SCALE) {
+    return MAX_PULSE_TICKS;
+  }
+
+  return pulseTicksForDuty(dutyPpmForStrength(value));
+}
+
+uint16_t pulseTicksForDuty(uint32_t dutyPpm) {
+  const uint64_t numerator = (uint64_t)NOMINAL_PWM_PERIOD_NS * dutyPpm * 2ULL;
+  const uint64_t denominator = 1000000ULL * 125ULL;
+  uint16_t ticks = (uint16_t)((numerator + denominator - 1ULL) / denominator);
+
+  if (ticks < MIN_PULSE_TICKS) {
+    return MIN_PULSE_TICKS;
+  }
+
+  if (ticks > MAX_PULSE_TICKS) {
+    return MAX_PULSE_TICKS;
+  }
+
+  return ticks;
+}
+
+uint32_t dutyPpmForStrength(uint32_t value) {
+  if (value == 0) {
+    return 0;
+  }
+
+  if (value <= 1000UL) {
+    return MIN_EFFECTIVE_DUTY_PPM;
+  }
+
+  if (value >= STRENGTH_SCALE) {
+    return MAX_EFFECTIVE_DUTY_PPM;
+  }
+
+  return MIN_EFFECTIVE_DUTY_PPM +
+    (uint32_t)(((uint64_t)(MAX_EFFECTIVE_DUTY_PPM - MIN_EFFECTIVE_DUTY_PPM) * (value - 1000UL)) / 99000ULL);
+}
+
+uint16_t periodTicksForDuty(uint16_t pulseTicks, uint32_t dutyPpm) {
+  if (dutyPpm == 0) {
+    return pulseTicks + 1;
+  }
+
+  uint32_t periodTicks = (uint32_t)((((uint64_t)pulseTicks * 1000000ULL) + dutyPpm - 1ULL) / dutyPpm);
+
+  if (periodTicks <= pulseTicks) {
+    periodTicks = pulseTicks + 1;
+  }
+
+  if (periodTicks > 65535UL) {
+    return 65535;
+  }
+
+  return (uint16_t)periodTicks;
+}
+
+uint32_t ticksToNanoseconds(uint16_t ticks) {
+  return ((uint32_t)ticks * 125UL + 1UL) / 2UL;
+}
+
+uint32_t ticksToMicroseconds(uint16_t ticks) {
+  return (((uint32_t)ticks * 125UL) + 1999UL) / 2000UL;
+}
+
+uint32_t constrainStrength(uint32_t value) {
+  if (value > STRENGTH_SCALE) {
+    return STRENGTH_SCALE;
+  }
+
+  return value;
+}
+
+void printMilliPercent(uint32_t value) {
+  Serial.print(value / 1000UL);
+  Serial.print('.');
+
+  const uint16_t fractional = (uint16_t)(value % 1000UL);
+  if (fractional < 100U) {
+    Serial.print('0');
+  }
+  if (fractional < 10U) {
+    Serial.print('0');
+  }
+  Serial.print(fractional);
+}
+
+void startFastPwm(uint16_t highTicks, uint16_t periodTicks) {
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    TCCR1A = 0;
+    TCCR1B = 0;
+    TCNT1 = 0;
+    ICR1 = periodTicks - 1U;
+    OCR1A = highTicks;
+    TIFR1 = _BV(TOV1) | _BV(OCF1A);
+    TIMSK1 &= ~_BV(TOIE1);
+    TCCR1A = _BV(COM1A1) | _BV(WGM11);
+    TCCR1B = _BV(WGM13) | _BV(WGM12) | _BV(CS10);
+  }
+}
+
+void stopMotor() {
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    TCCR1A = 0;
+    TCCR1B = 0;
+    TIMSK1 &= ~_BV(TOIE1);
+    PORTB &= ~_BV(PB1);
+  }
+}
+
+void printStatus() {
+  Serial.print("OK strength=");
+  printMilliPercent(strengthMilliPercent);
+  Serial.print(" pulse_ticks=");
+  Serial.print(configuredPulseTicks);
+  Serial.print(" period_ticks=");
+  Serial.print(configuredPeriodTicks);
+  Serial.print(" pulse_ns=");
+  Serial.print(configuredPulseNs);
+  Serial.print(" rest_us=");
+  Serial.print(configuredRestUs);
+  Serial.print(" period_us=");
+  Serial.print(configuredPeriodUs);
+  Serial.print(" duty_ppm=");
+  Serial.print(configuredDutyPpm);
+  Serial.print(" max_duty_ppm=");
+  Serial.print(MAX_EFFECTIVE_DUTY_PPM);
+  Serial.print(" timeout_ms=");
+  Serial.println(SERIAL_COMMAND_TIMEOUT_MS);
+}
+

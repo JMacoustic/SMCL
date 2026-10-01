@@ -1,0 +1,9 @@
+{
+  "additionalFiles": "",
+  "compiler.optimization_flags": "",
+  "customBuildProperties": "",
+  "fqbn": "arduino:avr:nano",
+  "hardwareFolders": "C:\\Users\\juhye\\AppData\\Local\\Arduino15\\packages\\arduino\\hardware\\avr\\1.8.6,C:\\Users\\juhye\\AppData\\Local\\Arduino15\\packages\\arduino\\hardware\\avr\\1.8.6",
+  "otherLibrariesFolders": "C:\\Users\\juhye\\Documents\\Arduino\\libraries",
+  "sketchLocation": "C:\\Users\\juhye\\Desktop\\CurrentFiles\\2025project\\impeller\\impeller"
+}
