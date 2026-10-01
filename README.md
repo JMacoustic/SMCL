@@ -13,8 +13,9 @@ Arduino로 임펠러(교반기) 모터의 회전수(RPM)를 닫힌 루프로 제
 ```
 SMCL/
 ├─ impeller_gui/                 ← PC용 제어·기록 프로그램 (Windows, Python)
-│   ├─ setup_venv.bat            ← 최초 1회 설치
-│   ├─ run_gui.bat               ← 실행
+│   ├─ setup_venv.bat            ← 최초 1회 설치 (python.org Python)
+│   ├─ setup_conda.bat           ← 최초 1회 설치 (Anaconda/Miniconda)
+│   ├─ run_gui.bat               ← 실행 (.venv 또는 conda 환경 자동 선택)
 │   ├─ run_tests.bat             ← 자체 점검(선택)
 │   └─ README.md                 ← 프로그램 상세 설명(영문)
 ├─ src/arduino_codes/impeller/   ← Arduino 펌웨어 (impeller.ino)
@@ -66,11 +67,23 @@ arduino-cli upload  --fqbn arduino:avr:nano --port COM12 src/arduino_codes/impel
 
 ## 4. PC 프로그램 설치 (최초 1회)
 
-1. 이 저장소를 PC 아무 곳에나 내려받습니다 (ZIP 다운로드 또는 `git clone`).
-2. `impeller_gui\setup_venv.bat`을 더블클릭합니다.
-   `impeller_gui\.venv\` 안에 전용 Python 가상환경을 만들고 `PySide6`, `pyserial`을 설치합니다.
-   PC의 다른 Python 환경은 건드리지 않습니다.
-3. "Setup complete"가 뜨면 끝입니다. 인터넷이 필요합니다.
+이 저장소를 PC 아무 곳에나 내려받은 뒤(ZIP 다운로드 또는 `git clone`), 아래 둘 중 **하나**를 고릅니다. 인터넷이 필요합니다.
+
+**A. python.org Python을 쓰는 경우**
+1. <https://www.python.org/downloads/> 에서 Python 3.9~3.12를 설치합니다. **"Add python.exe to PATH"**를 꼭 체크합니다.
+2. `impeller_gui\setup_venv.bat`을 더블클릭합니다. `impeller_gui\.venv\` 안에 전용 가상환경을 만들고 `PySide6`, `pyserial`을 설치합니다. PC의 다른 Python 환경은 건드리지 않습니다.
+
+**B. Anaconda / Miniconda를 쓰는 경우**
+1. 시작 메뉴에서 **Anaconda Prompt**(또는 Miniconda Prompt)를 엽니다.
+2. 그 창에서 `impeller_gui` 폴더로 이동해 `setup_conda.bat`을 실행합니다.
+   ```bat
+   cd 저장소경로\impeller_gui
+   setup_conda.bat
+   ```
+   `environment.yml`대로 `smcl`이라는 conda 환경(Python 3.12 + PySide6 + pyserial)이 만들어집니다.
+   이미 `smcl` 환경이 있으면 패키지만 갱신합니다.
+
+어느 쪽이든 "Setup complete"가 뜨면 끝입니다. `run_gui.bat`은 `.venv`가 있으면 그것을, 없으면 conda의 `smcl` 환경을 자동으로 찾아 씁니다. conda 환경을 쓸 때 `run_gui.bat`을 더블클릭해도 되지만, conda가 PATH에 없다고 나오면 Anaconda Prompt에서 실행하세요.
 
 ## 5. 실행과 사용 순서
 
@@ -144,6 +157,8 @@ arduino-cli upload  --fqbn arduino:avr:nano --port COM12 src/arduino_codes/impel
 
 | 증상 | 원인과 해결 |
 |---|---|
+| `setup_venv.bat`에서 `No runtime that matches 3` 또는 `No Python 3.9 or newer was found` | Python 런처만 있고 실제 Python이 없는 상태. python.org에서 Python을 설치하거나(4절 A), conda가 있으면 `setup_conda.bat`을 쓰세요(4절 B) |
+| `run_gui.bat`에서 `conda was not found on PATH` | Anaconda Prompt를 열어 그 창에서 `run_gui.bat`을 실행하세요 |
 | 포트 목록에 보드가 없다 | USB 케이블(데이터 지원 여부), CH340 드라이버 확인. 꽂은 뒤 **Refresh ports** |
 | Connect는 되는데 Ready가 안 된다 | 다른 프로그램(Arduino 시리얼 모니터 등)이 포트를 잡고 있거나, 보드에 `impeller.ino`가 아닌 다른 스케치가 올라가 있음 |
 | 메시지 창에 `ERR command timeout; stopped motor` | 보드의 2.5초 안전 정지. 프로그램은 회전 중 1초마다 자동으로 신호를 보내므로 정상 사용 중에는 나오지 않음. PC가 멈췄거나 케이블이 흔들린 경우 |

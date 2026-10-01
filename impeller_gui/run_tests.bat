@@ -1,12 +1,25 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+set "ENV_NAME=smcl"
 
-if not exist ".venv\Scripts\python.exe" (
-    echo Virtual environment not found - run setup_venv.bat first.
-    pause
-    exit /b 1
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" -m unittest discover -s tests -v
+    goto :finish
 )
 
-".venv\Scripts\python.exe" -m unittest discover -s tests -v
+where conda >nul 2>&1
+if not errorlevel 1 (
+    call conda env list 2>nul | findstr /B /C:"%ENV_NAME% " >nul 2>&1
+    if not errorlevel 1 (
+        call conda run -n %ENV_NAME% --no-capture-output python -m unittest discover -s tests -v
+        goto :finish
+    )
+)
+
+echo No Python environment found - run setup_venv.bat or setup_conda.bat first.
+pause
+exit /b 1
+
+:finish
 pause

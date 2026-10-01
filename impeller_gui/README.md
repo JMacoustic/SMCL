@@ -15,16 +15,21 @@ lets you try the program without an Arduino.
 
 ## 1. Setup (once)
 
-Requirements: Windows 10/11 and Python 3.9 – 3.12
-(download from <https://www.python.org/downloads/> and tick
-**"Add python.exe to PATH"** during installation).
+Requirements: Windows 10/11 and Python 3.9 – 3.12, either from python.org or
+from Anaconda/Miniconda. Copy or clone this folder (`impeller_gui/`) anywhere
+on the PC, then pick **one** of the two options.
 
-1. Copy or clone this folder (`impeller_gui/`) anywhere on the PC.
-2. Double-click **`setup_venv.bat`**.
-   It creates a private virtual environment in `impeller_gui\.venv\` and
-   installs `PySide6` and `pyserial` into it. Nothing else on the PC is changed.
+**A. python.org Python** — install it from <https://www.python.org/downloads/>
+(tick **"Add python.exe to PATH"**), then double-click **`setup_venv.bat`**.
+It creates a private virtual environment in `impeller_gui\.venv\` and installs
+`PySide6` and `pyserial` into it. Nothing else on the PC is changed.
 
-If you prefer the command line:
+**B. Anaconda / Miniconda** — open *Anaconda Prompt*, `cd` into this folder and
+run **`setup_conda.bat`**. It creates a conda environment named `smcl` from
+`environment.yml` (Python 3.12 + PySide6 + pyserial), or updates it if it
+already exists.
+
+Command-line equivalents:
 
 ```bat
 cd impeller_gui
@@ -32,15 +37,28 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
+```bat
+cd impeller_gui
+conda env create -f environment.yml
+```
+
 ## 2. Run
 
-Double-click **`run_gui.bat`** (it runs setup automatically the first time).
+Double-click **`run_gui.bat`**. It uses `.venv` if present, otherwise the
+conda environment `smcl`; if neither exists it runs the matching setup first.
+When using conda and the script says `conda was not found on PATH`, start it
+from *Anaconda Prompt* instead.
 
 Or, from a terminal:
 
 ```bat
 cd impeller_gui
 .venv\Scripts\python.exe -m impeller_control
+```
+
+```bat
+cd impeller_gui
+conda run -n smcl --no-capture-output python -m impeller_control
 ```
 
 ## 3. Using the program
