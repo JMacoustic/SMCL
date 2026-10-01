@@ -8,6 +8,7 @@
 
   Serial control at 115200 baud:
     T<rpm>  Set integer target RPM. T0 stops the motor.
+    O<pct>  Hold fixed safe output strength for calibration. O0 stops.
     P<kp>   Set PID proportional gain.
     I<ki>   Set PID integral gain.
     D<kd>   Set PID derivative gain.
@@ -28,33 +29,64 @@ const uint8_t MOTOR_PWM_PIN = 9;  // Arduino UNO PB1 / OC1A
 const float COUNTS_PER_REVOLUTION = 500.0f;
 
 // After running calibration.py, copy the generated calibration constants here before uploading.
-const uint8_t RPM_CALIB_POINT_COUNT = 10;
+const uint8_t RPM_CALIB_POINT_COUNT = 6;
 const float RPM_CALIB_MEASURED[RPM_CALIB_POINT_COUNT] = {
-  74.250f, 277.000f, 332.625f, 409.875f, 511.250f,
-  539.750f, 601.625f, 687.250f, 737.750f, 759.000f
+  234.615f, 319.800f, 386.857f,
+  476.400f, 558.800f, 656.200f
 };
 const float RPM_CALIB_REFERENCE[RPM_CALIB_POINT_COUNT] = {
-  50.000f, 250.000f, 300.000f, 350.000f, 400.000f,
-  450.000f, 500.000f, 750.000f, 1000.000f, 1000.000f
+  158.000f, 215.000f, 261.000f,
+  320.000f, 376.000f, 440.000f
 };
 
-const uint16_t MAX_TARGET_RPM = 1200;
+const uint16_t MAX_TARGET_RPM = 700;
 
-const unsigned long RPM_SAMPLE_INTERVAL_MS = 500UL;
-const unsigned long RPM_CALC_WINDOW_MS = 1500UL;
+const unsigned long RPM_SAMPLE_INTERVAL_MS = 250UL;
+const unsigned long RPM_CALC_WINDOW_MS = 1000UL;
 const uint8_t RPM_HISTORY_SIZE = 8;
-const float RPM_EMA_ALPHA = 0.5f;
+const float RPM_EMA_ALPHA = 0.65f;
 const unsigned long PID_INTERVAL_MS = 100UL;
 const unsigned long STATUS_INTERVAL_MS = 500UL;
+const unsigned long SERIAL_COMMAND_TIMEOUT_MS = 2500UL;
 
-const float DEFAULT_PID_KP = 0.07f;
-const float DEFAULT_PID_KI = 0.020f;
-const float DEFAULT_PID_KD = 0.003f;
+const float DEFAULT_PID_KP = 0.055f;
+const float DEFAULT_PID_KI = 0.035f;
+const float DEFAULT_PID_KD = 0.000f;
 const float MAX_PID_KP = 1.0f;
 const float MAX_PID_KI = 1.0f;
 const float MAX_PID_KD = 1.0f;
-const float PID_INTEGRAL_LIMIT = 2000.0f;
-const float PID_OUTPUT_RISE_LIMIT_PER_SECOND = 5.0f;
+const uint8_t FEEDFORWARD_POINT_COUNT = 10;
+const float FEEDFORWARD_RPM[FEEDFORWARD_POINT_COUNT] = {
+  270.0f, 290.0f, 310.0f, 330.0f, 350.0f,
+  370.0f, 390.0f, 410.0f, 430.0f, 450.0f
+};
+const float FEEDFORWARD_OUTPUT[FEEDFORWARD_POINT_COUNT] = {
+  21.400f, 23.565f, 25.715f, 27.827f, 29.835f,
+  31.619f, 33.402f, 35.110f, 36.814f, 38.773f
+};
+const float FEEDFORWARD_CONTROL_RATIO = 0.92f;
+const float FEEDFORWARD_PRECHARGE_RATIO = 0.85f;
+const float PID_D_FILTER_ALPHA = 0.35f;
+const float PID_CORRECTION_MIN_OUTPUT = -10.0f;
+const float PID_CORRECTION_MAX_OUTPUT = 6.0f;
+const float PID_INTEGRAL_LIMIT = 300.0f;
+const float PID_INTEGRATION_BAND_RPM = 25.0f;
+const float PID_OUTPUT_RISE_LIMIT_PER_SECOND = 16.0f;
+const float PID_SETPOINT_RISE_RPM_PER_SECOND = 220.0f;
+const float PID_SETPOINT_FALL_RPM_PER_SECOND = 180.0f;
+const float PID_HOLD_BAND_RPM = 3.0f;
+const float PID_RESUME_BAND_RPM = 5.0f;
+const unsigned long PID_HOLD_CONFIRM_MS = 1500UL;
+const float RPM_OVERSPEED_STOP_RPM = 750.0f;
+
+const bool USE_FIXED_TARGET_OUTPUT_TABLE = false;
+const uint8_t FIXED_TARGET_OUTPUT_POINT_COUNT = 2;
+const float FIXED_TARGET_RPM[FIXED_TARGET_OUTPUT_POINT_COUNT] = {
+  430.0f, 450.0f
+};
+const float FIXED_TARGET_OUTPUT[FIXED_TARGET_OUTPUT_POINT_COUNT] = {
+  37.7f, 40.4f
+};
 
 const uint16_t MIN_PULSE_WIDTH_NS = 300;
 const uint16_t MAX_PULSE_WIDTH_NS = 3500;
@@ -77,12 +109,14 @@ volatile uint8_t lastEncoderState = 0;
 unsigned long lastRpmSampleMs = 0;
 unsigned long lastPidMs = 0;
 unsigned long lastStatusMs = 0;
+unsigned long lastSerialCommandMs = 0;
 
 unsigned long countSampleTimes[RPM_HISTORY_SIZE];
 long countSamples[RPM_HISTORY_SIZE];
 uint8_t countSampleIndex = 0;
 uint8_t countSampleCount = 0;
 
+float rpmEncoder = 0.0f;
 float rpmRaw = 0.0f;
 float rpmMeasured = 0.0f;
 bool rpmMeasuredReady = false;
@@ -93,6 +127,13 @@ float pidOutput = 0.0f;
 float pidKp = DEFAULT_PID_KP;
 float pidKi = DEFAULT_PID_KI;
 float pidKd = DEFAULT_PID_KD;
+float pidSetpointRpm = 0.0f;
+float lastControlRpm = 0.0f;
+float filteredControlDerivative = 0.0f;
+bool controlDerivativeReady = false;
+bool pidOutputHold = false;
+unsigned long pidHoldBandSinceMs = 0;
+bool openLoopMode = false;
 
 uint32_t pwmStrengthMilliPercent = 0;
 uint16_t configuredPulseTicks = MIN_PULSE_TICKS;
@@ -128,6 +169,7 @@ void setup() {
   recordCountSample(lastRpmSampleMs, 0);
   lastPidMs = millis();
   lastStatusMs = millis();
+  lastSerialCommandMs = millis();
 
   Serial.println("Impeller PID controller ready.");
   Serial.println("Encoder: A->D2, B->D3. PWM: D9 / OC1A.");
@@ -136,6 +178,7 @@ void setup() {
 
 void loop() {
   readSerialCommands();
+  enforceSerialCommandTimeout();
   updateRpm();
   updatePid();
   printPeriodicStatus();
@@ -166,6 +209,7 @@ void updateRpm() {
   }
 
   rpmRaw = unscaledRpm > 0.0f ? calibrateRpm(unscaledRpm) : 0.0f;
+  rpmEncoder = unscaledRpm;
   rpmMeasured = smoothRpm(rpmRaw);
 
   lastRpmSampleMs = now;
@@ -267,13 +311,17 @@ float calibrateRpm(float measuredRpm) {
 }
 
 float interpolateRpm(float measuredRpm, float measuredLow, float referenceLow, float measuredHigh, float referenceHigh) {
-  const float measuredSpan = measuredHigh - measuredLow;
-  if (measuredSpan == 0.0f) {
-    return referenceLow;
+  return interpolateFloat(measuredRpm, measuredLow, referenceLow, measuredHigh, referenceHigh);
+}
+
+float interpolateFloat(float x, float x0, float y0, float x1, float y1) {
+  const float span = x1 - x0;
+  if (span == 0.0f) {
+    return y0;
   }
 
-  const float position = (measuredRpm - measuredLow) / measuredSpan;
-  return referenceLow + (position * (referenceHigh - referenceLow));
+  const float position = (x - x0) / span;
+  return y0 + (position * (y1 - y0));
 }
 
 void updatePid() {
@@ -285,23 +333,94 @@ void updatePid() {
   const float dt = (now - lastPidMs) / 1000.0f;
   lastPidMs = now;
 
-  if (targetRpm == 0) {
+  if (targetRpm == 0 && !openLoopMode) {
     pidIntegral = 0.0f;
     lastError = 0.0f;
+    resetControlDerivative(0.0f);
     pidOutput = 0.0f;
+    pidSetpointRpm = 0.0f;
+    pidOutputHold = false;
+    pidHoldBandSinceMs = 0;
     applyPwmStrength(0);
     return;
   }
 
-  const float error = (float)targetRpm - rpmMeasured;
-  pidIntegral += error * dt;
-  pidIntegral = constrainFloat(pidIntegral, -PID_INTEGRAL_LIMIT, PID_INTEGRAL_LIMIT);
+  if (rpmMeasured > RPM_OVERSPEED_STOP_RPM || rpmRaw > RPM_OVERSPEED_STOP_RPM) {
+    Serial.println("ERR overspeed; stopped motor");
+    setTargetRpm(0);
+    printStatus();
+    return;
+  }
 
-  const float derivative = (error - lastError) / dt;
+  if (openLoopMode) {
+    applyPwmStrength((uint32_t)(pidOutput * 1000.0f + 0.5f));
+    return;
+  }
+
+  if (USE_FIXED_TARGET_OUTPUT_TABLE) {
+    pidSetpointRpm = (float)targetRpm;
+    pidOutput = fixedOutputForRpm((float)targetRpm);
+    applyPwmStrength((uint32_t)(pidOutput * 1000.0f + 0.5f));
+    return;
+  }
+
+  updatePidSetpoint(dt);
+
+  const float controlRpm = maxFloat(rpmMeasured, rpmRaw);
+  const float error = pidSetpointRpm - controlRpm;
+  const float absError = absFloat(error);
+  const float targetError = maxFloat(
+    absFloat((float)targetRpm - rpmMeasured),
+    absFloat((float)targetRpm - rpmRaw)
+  );
+  const bool finalSetpointReached = absFloat(pidSetpointRpm - (float)targetRpm) < 0.5f;
+
+  if (pidOutputHold) {
+    lastError = error;
+
+    if (targetError <= PID_RESUME_BAND_RPM) {
+      applyPwmStrength((uint32_t)(pidOutput * 1000.0f + 0.5f));
+      return;
+    }
+
+    pidOutputHold = false;
+    pidHoldBandSinceMs = 0;
+  }
+
+  if (finalSetpointReached && targetError <= PID_HOLD_BAND_RPM) {
+    if (pidHoldBandSinceMs == 0) {
+      pidHoldBandSinceMs = now;
+    } else if (now - pidHoldBandSinceMs >= PID_HOLD_CONFIRM_MS) {
+      pidOutputHold = true;
+      lastError = error;
+      applyPwmStrength((uint32_t)(pidOutput * 1000.0f + 0.5f));
+      return;
+    }
+  } else {
+    pidHoldBandSinceMs = 0;
+  }
+
+  const bool shouldIntegrate =
+    absError <= PID_INTEGRATION_BAND_RPM ||
+    (pidIntegral > 0.0f && error < 0.0f) ||
+    (pidIntegral < 0.0f && error > 0.0f);
+
+  if (shouldIntegrate) {
+    pidIntegral += error * dt;
+    pidIntegral = constrainFloat(pidIntegral, -PID_INTEGRAL_LIMIT, PID_INTEGRAL_LIMIT);
+  }
+
+  const float controlDerivative = updateControlDerivative(controlRpm, dt);
   lastError = error;
 
+  const float feedforwardOutput = controlFeedforwardForRpm((float)targetRpm);
+  const float pidCorrection = constrainFloat(
+    (pidKp * error) + (pidKi * pidIntegral) - (pidKd * controlDerivative),
+    PID_CORRECTION_MIN_OUTPUT,
+    PID_CORRECTION_MAX_OUTPUT
+  );
   const float requestedOutput = constrainFloat(
-    (pidKp * error) + (pidKi * pidIntegral) + (pidKd * derivative),
+    feedforwardOutput + pidCorrection,
     0.0f,
     100.0f
   );
@@ -314,6 +433,113 @@ void updatePid() {
   }
 
   applyPwmStrength((uint32_t)(pidOutput * 1000.0f + 0.5f));
+}
+
+float feedforwardForRpm(float rpm) {
+  if (FEEDFORWARD_POINT_COUNT == 0 || rpm <= 0.0f) {
+    return 0.0f;
+  }
+
+  if (FEEDFORWARD_POINT_COUNT == 1) {
+    return FEEDFORWARD_OUTPUT[0];
+  }
+
+  if (rpm <= FEEDFORWARD_RPM[0]) {
+    return interpolateFloat(
+      rpm,
+      FEEDFORWARD_RPM[0],
+      FEEDFORWARD_OUTPUT[0],
+      FEEDFORWARD_RPM[1],
+      FEEDFORWARD_OUTPUT[1]
+    );
+  }
+
+  for (uint8_t i = 1; i < FEEDFORWARD_POINT_COUNT; i++) {
+    if (rpm <= FEEDFORWARD_RPM[i]) {
+      return interpolateFloat(
+        rpm,
+        FEEDFORWARD_RPM[i - 1],
+        FEEDFORWARD_OUTPUT[i - 1],
+        FEEDFORWARD_RPM[i],
+        FEEDFORWARD_OUTPUT[i]
+      );
+    }
+  }
+
+  const uint8_t last = FEEDFORWARD_POINT_COUNT - 1;
+  return interpolateFloat(
+    rpm,
+    FEEDFORWARD_RPM[last - 1],
+    FEEDFORWARD_OUTPUT[last - 1],
+    FEEDFORWARD_RPM[last],
+    FEEDFORWARD_OUTPUT[last]
+  );
+}
+
+float controlFeedforwardForRpm(float rpm) {
+  return feedforwardForRpm(rpm) * FEEDFORWARD_CONTROL_RATIO;
+}
+
+float fixedOutputForRpm(float rpm) {
+  if (FIXED_TARGET_OUTPUT_POINT_COUNT == 0 || rpm <= 0.0f) {
+    return 0.0f;
+  }
+
+  if (FIXED_TARGET_OUTPUT_POINT_COUNT == 1) {
+    return FIXED_TARGET_OUTPUT[0];
+  }
+
+  if (rpm <= FIXED_TARGET_RPM[0]) {
+    return FIXED_TARGET_OUTPUT[0];
+  }
+
+  for (uint8_t i = 1; i < FIXED_TARGET_OUTPUT_POINT_COUNT; i++) {
+    if (rpm <= FIXED_TARGET_RPM[i]) {
+      return interpolateFloat(
+        rpm,
+        FIXED_TARGET_RPM[i - 1],
+        FIXED_TARGET_OUTPUT[i - 1],
+        FIXED_TARGET_RPM[i],
+        FIXED_TARGET_OUTPUT[i]
+      );
+    }
+  }
+
+  return FIXED_TARGET_OUTPUT[FIXED_TARGET_OUTPUT_POINT_COUNT - 1];
+}
+
+float updateControlDerivative(float controlRpm, float dt) {
+  if (!controlDerivativeReady || dt <= 0.0f) {
+    resetControlDerivative(controlRpm);
+    return 0.0f;
+  }
+
+  const float measuredDerivative = (controlRpm - lastControlRpm) / dt;
+  filteredControlDerivative += PID_D_FILTER_ALPHA * (measuredDerivative - filteredControlDerivative);
+  lastControlRpm = controlRpm;
+  return filteredControlDerivative;
+}
+
+void resetControlDerivative(float controlRpm) {
+  lastControlRpm = controlRpm;
+  filteredControlDerivative = 0.0f;
+  controlDerivativeReady = true;
+}
+
+void updatePidSetpoint(float dt) {
+  const float finalTarget = (float)targetRpm;
+
+  if (pidSetpointRpm < finalTarget) {
+    pidSetpointRpm += PID_SETPOINT_RISE_RPM_PER_SECOND * dt;
+    if (pidSetpointRpm > finalTarget) {
+      pidSetpointRpm = finalTarget;
+    }
+  } else if (pidSetpointRpm > finalTarget) {
+    pidSetpointRpm -= PID_SETPOINT_FALL_RPM_PER_SECOND * dt;
+    if (pidSetpointRpm < finalTarget) {
+      pidSetpointRpm = finalTarget;
+    }
+  }
 }
 
 void readSerialCommands() {
@@ -337,6 +563,7 @@ void readSerialCommands() {
 
 void processCommand(char *command) {
   if (command[0] == '?') {
+    markValidSerialCommand();
     printStatus();
     return;
   }
@@ -344,11 +571,26 @@ void processCommand(char *command) {
   if (command[0] == 'T' || command[0] == 't') {
     uint16_t value;
     if (!parseNonNegativeInteger(command + 1, &value) || value > MAX_TARGET_RPM) {
-      Serial.println("ERR use T0-T1200");
+      Serial.print("ERR use T0-T");
+      Serial.println(MAX_TARGET_RPM);
       return;
     }
 
+    markValidSerialCommand();
     setTargetRpm(value);
+    printStatus();
+    return;
+  }
+
+  if (command[0] == 'O' || command[0] == 'o') {
+    float value;
+    if (!parseNonNegativeFloat(command + 1, &value) || value > 100.0f) {
+      Serial.println("ERR open-loop output must be O0-O100");
+      return;
+    }
+
+    markValidSerialCommand();
+    setOpenLoopOutput(value);
     printStatus();
     return;
   }
@@ -370,15 +612,35 @@ void processCommand(char *command) {
 
   if (command[0] == 'S' || command[0] == 's') {
     if (command[1] == '0' && command[2] == '\0') {
+      markValidSerialCommand();
       setTargetRpm(0);
       printStatus();
     } else {
-      Serial.println("ERR PID sketch only accepts S0 stop; use T<rpm>");
+      Serial.println("ERR PID sketch only accepts S0 stop; use T<rpm> or O<pct>");
     }
     return;
   }
 
-  Serial.println("ERR use T<rpm>, P<kp>, I<ki>, D<kd>, S0, or ?");
+  Serial.println("ERR use T<rpm>, O<pct>, P<kp>, I<ki>, D<kd>, S0, or ?");
+}
+
+void markValidSerialCommand() {
+  lastSerialCommandMs = millis();
+}
+
+void enforceSerialCommandTimeout() {
+  if ((targetRpm == 0 && !openLoopMode) || SERIAL_COMMAND_TIMEOUT_MS == 0UL) {
+    return;
+  }
+
+  if (millis() - lastSerialCommandMs <= SERIAL_COMMAND_TIMEOUT_MS) {
+    return;
+  }
+
+  Serial.println("ERR command timeout; stopped motor");
+  openLoopMode = false;
+  setTargetRpm(0);
+  printStatus();
 }
 
 bool parseNonNegativeInteger(char *text, uint16_t *value) {
@@ -410,6 +672,7 @@ void processPidGainCommand(char *text, char gainName, float maxValue) {
     return;
   }
 
+  markValidSerialCommand();
   setPidGain(gainName, value);
   printStatus();
 }
@@ -441,14 +704,48 @@ bool parseNonNegativeFloat(char *text, float *value) {
 }
 
 void setTargetRpm(uint16_t value) {
+  openLoopMode = false;
   targetRpm = value;
   pidIntegral = 0.0f;
-  lastError = (float)targetRpm - rpmMeasured;
+  pidSetpointRpm = rpmMeasured;
+  const float controlRpm = maxFloat(rpmMeasured, rpmRaw);
+  lastError = pidSetpointRpm - controlRpm;
+  resetControlDerivative(controlRpm);
+  pidOutputHold = false;
+  pidHoldBandSinceMs = 0;
 
   if (targetRpm == 0) {
     pidOutput = 0.0f;
+    pidSetpointRpm = 0.0f;
     applyPwmStrength(0);
+  } else {
+    const float prechargeOutput = feedforwardForRpm((float)targetRpm) * FEEDFORWARD_PRECHARGE_RATIO;
+    if (prechargeOutput > pidOutput) {
+      pidOutput = constrainFloat(prechargeOutput, 0.0f, 100.0f);
+      applyPwmStrength((uint32_t)(pidOutput * 1000.0f + 0.5f));
+    }
   }
+}
+
+void setOpenLoopOutput(float value) {
+  targetRpm = 0;
+  pidIntegral = 0.0f;
+  lastError = 0.0f;
+  pidSetpointRpm = 0.0f;
+  resetControlDerivative(0.0f);
+  pidOutputHold = false;
+  pidHoldBandSinceMs = 0;
+
+  if (value <= 0.0f) {
+    openLoopMode = false;
+    pidOutput = 0.0f;
+    applyPwmStrength(0);
+    return;
+  }
+
+  openLoopMode = true;
+  pidOutput = constrainFloat(value, 0.0f, 100.0f);
+  applyPwmStrength((uint32_t)(pidOutput * 1000.0f + 0.5f));
 }
 
 void setPidGain(char gainName, float value) {
@@ -461,7 +758,11 @@ void setPidGain(char gainName, float value) {
   }
 
   pidIntegral = 0.0f;
-  lastError = (float)targetRpm - rpmMeasured;
+  const float controlRpm = maxFloat(rpmMeasured, rpmRaw);
+  lastError = pidSetpointRpm - controlRpm;
+  resetControlDerivative(controlRpm);
+  pidOutputHold = false;
+  pidHoldBandSinceMs = 0;
 }
 
 void applyPwmStrength(uint32_t value) {
@@ -669,6 +970,14 @@ float constrainFloat(float value, float low, float high) {
   return value;
 }
 
+float absFloat(float value) {
+  return value < 0.0f ? -value : value;
+}
+
+float maxFloat(float a, float b) {
+  return a > b ? a : b;
+}
+
 void printPeriodicStatus() {
   const unsigned long now = millis();
   if (now - lastStatusMs < STATUS_INTERVAL_MS) {
@@ -682,18 +991,30 @@ void printPeriodicStatus() {
 void printStatus() {
   Serial.print("OK target_rpm=");
   Serial.print(targetRpm);
+  Serial.print(" setpoint_rpm=");
+  printRoundedRpm(pidSetpointRpm);
   Serial.print(" measured_rpm=");
   printRoundedRpm(rpmMeasured);
   Serial.print(" raw_rpm=");
   printRoundedRpm(rpmRaw);
+  Serial.print(" encoder_rpm=");
+  printRoundedRpm(rpmEncoder);
   Serial.print(" output=");
   Serial.print(pidOutput, 2);
+  Serial.print(" hold=");
+  Serial.print(pidOutputHold ? 1 : 0);
+  Serial.print(" open_loop=");
+  Serial.print(openLoopMode ? 1 : 0);
   Serial.print(" kp=");
   Serial.print(pidKp, 4);
   Serial.print(" ki=");
   Serial.print(pidKi, 4);
   Serial.print(" kd=");
   Serial.print(pidKd, 4);
+  Serial.print(" d_rpm_s=");
+  Serial.print(filteredControlDerivative, 2);
+  Serial.print(" ff=");
+  Serial.print(controlFeedforwardForRpm((float)targetRpm), 2);
   Serial.print(" strength=");
   printMilliPercent(pwmStrengthMilliPercent);
   Serial.print(" calib_points=");
