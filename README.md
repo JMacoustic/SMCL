@@ -95,26 +95,51 @@ arduino-cli upload  --fqbn arduino:avr:nano --port COM12 src/arduino_codes/impel
 3. 표시등이 **초록색 "Ready"**가 되면 준비 완료입니다. 포트를 열면 보드가 재부팅되므로 1~2초 걸립니다.
 4. 보드가 없을 때는 **Simulator**를 골라 프로그램 사용법을 연습할 수 있습니다.
 
-### ② 1. Ramp settings — 어떻게 올릴지
+### ② 1. Simple ramp / 1. Custom profile — 어떻게 돌릴지
+속도 계획은 두 탭 중 하나로 정합니다. 현재 보고 있는 탭의 계획이 실행됩니다.
+
+**Simple ramp 탭** — 숫자 입력으로 "시작 → 목표로 올리고 → 유지 → 정지"를 정합니다.
 | 항목 | 설명 |
 |---|---|
 | Target speed | 도달할 목표 RPM |
-| Max allowed speed | 프로그램이 보낼 수 있는 상한(기본 700). 펌웨어가 거부하면 자동으로 낮아짐 |
 | Start speed | 램프 시작 RPM. **from current target**을 켜두면 보드가 지금 유지 중인 목표(정지 상태면 0)에서 시작 |
 | Ramp mode | **Linear**: 일정 기울기로 상승. **Stepped**: 일정 RPM씩 계단식으로 상승 |
 | Ramp speed | Linear일 때 **Rate**(RPM/s) 또는 **Duration**(총 소요 초) 중 하나로 지정. 나머지 값은 옆에 계산되어 표시 |
 | Step size / dwell | Stepped일 때 한 계단의 크기와 유지 시간 |
 | Hold at target | 목표 도달 후 유지할 시간. **until Stop is pressed**를 켜면 STOP을 누를 때까지 유지 |
 | Stop the motor when the hold time ends | 유지 시간이 끝나면 자동 정지. 끄면 계속 회전 |
-| Setpoint update interval | 램프 중 중간 목표를 보드에 보내는 간격. 기본 0.5 s 권장 |
 
 아래 **Plan** 줄에 설정이 문장으로 요약되므로 실행 전에 한 번 읽어보면 됩니다.
+
+**Custom profile 탭** — 오른쪽 그래프(가로 시간, 세로 RPM) 위에 점을 찍어 원하는 속도 곡선을 직접 그립니다.
+
+| 조작 | 동작 |
+|---|---|
+| 빈 곳 클릭 | 그 시간·속도에 점 추가 (격자에 맞춰짐) |
+| 점 드래그 | 점 이동. 첫 점은 항상 t = 0에 고정되어 속도만 바뀜 |
+| 점 더블클릭 | 시간·속도를 숫자로 정확히 입력 |
+| 점 우클릭 또는 Delete 키 | 점 삭제 (첫 점은 삭제 불가, 최소 2점 유지) |
+| 왼쪽 표 | 같은 점 목록. 셀을 고쳐도 그래프에 반영됨 |
+
+| 항목 | 설명 |
+|---|---|
+| Connect points | **Linear**: 점 사이를 직선 램프로 연결. **Smooth**: 점을 모두 지나는 부드러운 곡선(점 사이 범위를 벗어나는 오버슈트 없음). **Step**: 다음 점까지 이전 속도를 유지하는 계단 |
+| After last point | 마지막 점 이후 **Stop the motor**(정지) 또는 **Hold last speed until Stop**(STOP 누를 때까지 유지) |
+| Snap to grid | 클릭·드래그 시 시간과 속도를 맞출 간격. 0이면 끔 |
+| Time axis length | 그래프 가로축 길이. auto면 프로파일 길이에 맞춤 |
+| Add point / Remove / Clear | 표 기준 점 추가·삭제·초기화 |
+| Load… / Save… | 프로파일을 JSON 파일로 저장·불러오기. 자주 쓰는 스케줄을 파일로 돌려쓸 수 있음 |
+| Start from the simple ramp settings | Simple ramp 탭의 설정을 점으로 변환해 가져오기 |
+
+실행 중에는 그래프 위에 **측정 RPM(빨간 선)**과 현재 시각(초록 점선)이 함께 그려져 계획과 실제를 바로 비교할 수 있습니다. 실행 중 편집은 잠깁니다.
+
+**공통 설정(3. Run 안)**: **Max speed**는 두 탭 모두에 적용되는 상한(기본 700)이고, **Update every**는 중간 목표를 보드에 보내는 간격(기본 0.5 s)입니다.
 
 ### ③ 2. CSV logging — 어디에 기록할지
 - **Folder**, **File prefix**를 정합니다. 파일명은 `접두어_YYYYMMDD_HHMMSS.csv`이고 기존 파일을 덮어쓰지 않습니다.
 - 기본 설정(두 체크박스 켜짐)에서는 **Start ramp를 누를 때마다 새 CSV가 열리고, 실행이 끝나면 닫힙니다.**
 - 실행과 무관하게 기록하려면 **Start logging / Stop logging**을 직접 누릅니다 (예: 정지 후 감속 과정을 담고 싶을 때).
-- CSV 옆에 같은 이름의 `_meta.json`이 생기며 그때의 램프 설정이 들어 있습니다.
+- CSV 옆에 같은 이름의 `_meta.json`이 생기며 그때의 램프 설정 또는 프로파일 점 목록이 들어 있습니다.
 
 ### ④ 3. Run
 - **▶ Start ramp**: 계획대로 실행. 실행 중에는 설정이 잠깁니다.
@@ -138,7 +163,7 @@ arduino-cli upload  --fqbn arduino:avr:nano --port COM12 src/arduino_codes/impel
 | `unix_time_s` | 같은 시각의 Unix 초 |
 | `log_elapsed_s` | 이 파일을 연 뒤 경과 초 |
 | `run_elapsed_s` | Start ramp를 누른 뒤 경과 초 (실행 전이면 빈칸) |
-| `phase` | `idle` / `ramping` / `holding` / `finished` / `stopped` |
+| `phase` | `idle` / `ramping`(프로파일 추종 중 포함) / `holding` / `finished` / `stopped` |
 | `commanded_rpm` | 프로그램이 마지막으로 보낸 목표 |
 | `controller_target_rpm` | 보드가 현재 쓰는 목표 |
 | `measured_rpm` | 보정·평활된 측정 RPM |

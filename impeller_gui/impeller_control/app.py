@@ -7,7 +7,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QFont
@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSpinBox,
+    QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -36,6 +38,8 @@ from PySide6.QtWidgets import (
 from . import __version__
 from .csv_logger import CsvLogger, make_log_path
 from .plot_widget import RpmPlot
+from .profile import CustomProfile
+from .profile_editor import ProfileCanvas, ProfileModel, ProfilePanel
 from .protocol import DEFAULT_BAUD, ImpellerLink, ImpellerStatus, LinkError, SerialImpellerLink, list_serial_ports
 from .ramp import CONTROLLER_MAX_RPM, RampMode, RampPhase, RampProfile, RampSettings, rate_from_duration
 from .simulator import SimulatedImpellerLink
@@ -68,7 +72,7 @@ class MainWindow(QMainWindow):
         self.qsettings = QSettings("ViscNet", "ImpellerRampControl")
         self.link: Optional[ImpellerLink] = None
         self.logger = CsvLogger()
-        self.profile: Optional[RampProfile] = None
+        self.profile: Optional[Union[RampProfile, CustomProfile]] = None  # the running schedule
         self.run_started_at: Optional[float] = None
         self.run_phase = RampPhase.IDLE
         self.connected_at: Optional[float] = None
@@ -105,14 +109,22 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(self._build_connection_group())
 
+        # Custom profile editor: the model is shared by the canvas (right column)
+        # and the control panel (left column).
+        self.profile_model = ProfileModel()
+        self.profile_canvas = ProfileCanvas(self.profile_model)
+        self.profile_panel = ProfilePanel(self.profile_model, self.profile_canvas)
+
         body = QHBoxLayout()
         body.setSpacing(10)
         left = QVBoxLayout()
         left.setSpacing(8)
-        left.addWidget(self._build_ramp_group())
+        self.plan_tabs = QTabWidget()
+        self.plan_tabs.addTab(self._build_ramp_group(), "1. Simple ramp")
+        self.plan_tabs.addTab(self._build_profile_tab(), "1. Custom profile")
+        left.addWidget(self.plan_tabs, 1)
         left.addWidget(self._build_logging_group())
         left.addWidget(self._build_run_group())
-        left.addStretch(1)
         left_widget = QWidget()
         left_widget.setLayout(left)
         left_widget.setFixedWidth(430)
@@ -122,9 +134,13 @@ class MainWindow(QMainWindow):
         right.setSpacing(8)
         right.addWidget(self._build_readout_group())
         self.plot = RpmPlot(window_s=120.0)
-        right.addWidget(self.plot, 1)
+        self.right_stack = QStackedWidget()
+        self.right_stack.addWidget(self.plot)  # index 0: simple ramp -> rolling plot
+        self.right_stack.addWidget(self.profile_canvas)  # index 1: custom profile -> editor
+        right.addWidget(self.right_stack, 1)
         right.addWidget(self._build_console_group())
         body.addLayout(right, 1)
+        self.plan_tabs.currentChanged.connect(self._on_plan_tab_changed)
 
         outer.addLayout(body, 1)
         self.setCentralWidget(root)
@@ -164,16 +180,6 @@ class MainWindow(QMainWindow):
         self.target_spin.setSuffix(" RPM")
         self.target_spin.setValue(300)
         form.addRow("Target speed", self.target_spin)
-
-        self.limit_spin = QSpinBox()
-        self.limit_spin.setRange(1, CONTROLLER_MAX_RPM)
-        self.limit_spin.setSuffix(" RPM")
-        self.limit_spin.setValue(DEFAULT_RPM_LIMIT)
-        self.limit_spin.setToolTip(
-            "Highest target this program will send. The firmware has its own MAX_TARGET_RPM;\n"
-            "if it rejects a target, the limit here is lowered to match automatically."
-        )
-        form.addRow("Max allowed speed", self.limit_spin)
 
         start_row = QHBoxLayout()
         self.start_from_current_check = QCheckBox("from current target")
@@ -248,18 +254,6 @@ class MainWindow(QMainWindow):
         self.stop_after_check.setChecked(True)
         form.addRow("", self.stop_after_check)
 
-        self.interval_spin = QDoubleSpinBox()
-        self.interval_spin.setRange(0.2, 10.0)
-        self.interval_spin.setDecimals(1)
-        self.interval_spin.setSingleStep(0.1)
-        self.interval_spin.setSuffix(" s")
-        self.interval_spin.setValue(0.5)
-        self.interval_spin.setToolTip(
-            "How often a new target is sent while ramping.\n"
-            "The Arduino resets its PID integral on every new target, so 0.5-1 s is a good range."
-        )
-        form.addRow("Setpoint update interval", self.interval_spin)
-
         self.profile_summary = QLabel()
         self.profile_summary.setWordWrap(True)
         self.profile_summary.setStyleSheet("color: #1f4e79; font-weight: bold;")
@@ -267,7 +261,6 @@ class MainWindow(QMainWindow):
 
         for widget in (self.target_spin, self.start_spin, self.rate_spin, self.duration_spin, self.step_spin, self.dwell_spin, self.hold_spin):
             widget.valueChanged.connect(self._refresh_profile_summary)
-        self.limit_spin.valueChanged.connect(self._apply_rpm_limit)
         for widget in (self.mode_combo, self.linear_spec_combo):
             widget.currentIndexChanged.connect(self._refresh_profile_summary)
         for widget in (self.start_from_current_check, self.hold_forever_check, self.stop_after_check):
@@ -276,6 +269,20 @@ class MainWindow(QMainWindow):
         self.hold_forever_check.toggled.connect(lambda checked: self.hold_spin.setEnabled(not checked))
         self.start_spin.setEnabled(False)
         return group
+
+    def _build_profile_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        intro = QLabel("Draw the schedule on the graph to the right; points are connected as chosen below.")
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #555555;")
+        layout.addWidget(intro)
+        layout.addWidget(self.profile_panel, 1)
+        self.copy_ramp_button = QPushButton("Start from the simple ramp settings")
+        self.copy_ramp_button.setToolTip("Replace the points with the ramp defined on the Simple ramp tab.")
+        self.copy_ramp_button.clicked.connect(self._copy_simple_ramp_to_profile)
+        layout.addWidget(self.copy_ramp_button)
+        return tab
 
     def _build_logging_group(self) -> QGroupBox:
         group = QGroupBox("2. CSV logging")
@@ -337,6 +344,33 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.start_button, 1)
         button_row.addWidget(self.stop_button, 1)
         layout.addLayout(button_row)
+
+        common = QHBoxLayout()
+        self.limit_spin = QSpinBox()
+        self.limit_spin.setRange(1, CONTROLLER_MAX_RPM)
+        self.limit_spin.setSuffix(" RPM")
+        self.limit_spin.setValue(DEFAULT_RPM_LIMIT)
+        self.limit_spin.setToolTip(
+            "Highest target this program will send. The firmware has its own MAX_TARGET_RPM;\n"
+            "if it rejects a target, the limit here is lowered to match automatically."
+        )
+        common.addWidget(QLabel("Max speed"))
+        common.addWidget(self.limit_spin, 1)
+        common.addSpacing(8)
+        self.interval_spin = QDoubleSpinBox()
+        self.interval_spin.setRange(0.2, 10.0)
+        self.interval_spin.setDecimals(1)
+        self.interval_spin.setSingleStep(0.1)
+        self.interval_spin.setSuffix(" s")
+        self.interval_spin.setValue(0.5)
+        self.interval_spin.setToolTip(
+            "How often a new target is sent while following the schedule.\n"
+            "The Arduino resets its PID integral on every new target, so 0.5-1 s is a good range."
+        )
+        common.addWidget(QLabel("Update every"))
+        common.addWidget(self.interval_spin, 1)
+        layout.addLayout(common)
+        self.limit_spin.valueChanged.connect(self._apply_rpm_limit)
 
         manual_row = QHBoxLayout()
         manual_row.addWidget(QLabel("Manual target"))
@@ -457,6 +491,20 @@ class MainWindow(QMainWindow):
         self.autolog_stop_check.setChecked(_as_bool(s.value("log/auto_stop", True)))
         self.show_status_check.setChecked(_as_bool(s.value("console/show_status", False)))
         self.manual_spin.setValue(int(s.value("manual/target", 0)))
+        profile_json = s.value("profile/json")
+        if profile_json:
+            try:
+                profile = CustomProfile.from_json(str(profile_json))
+                profile.max_rpm = self.limit_spin.value()
+                profile.validate()
+                self.profile_model.replace(profile)
+            except (ValueError, KeyError, TypeError):
+                pass
+        self.profile_panel.snap_t_spin.setValue(float(s.value("profile/snap_t", 1.0)))
+        self.profile_panel.snap_rpm_spin.setValue(float(s.value("profile/snap_rpm", 10.0)))
+        self.profile_panel.axis_spin.setValue(float(s.value("profile/axis_s", 0.0)))
+        self.plan_tabs.setCurrentIndex(int(s.value("plan/tab", 0)))
+        self._on_plan_tab_changed(self.plan_tabs.currentIndex())
         self._preferred_port = str(s.value("connection/port", ""))
         geometry = s.value("window/geometry")
         if geometry is not None:
@@ -484,6 +532,11 @@ class MainWindow(QMainWindow):
         s.setValue("log/auto_stop", self.autolog_stop_check.isChecked())
         s.setValue("console/show_status", self.show_status_check.isChecked())
         s.setValue("manual/target", self.manual_spin.value())
+        s.setValue("profile/json", self.profile_model.profile.to_json())
+        s.setValue("profile/snap_t", self.profile_panel.snap_t_spin.value())
+        s.setValue("profile/snap_rpm", self.profile_panel.snap_rpm_spin.value())
+        s.setValue("profile/axis_s", self.profile_panel.axis_spin.value())
+        s.setValue("plan/tab", self.plan_tabs.currentIndex())
         port = self.port_combo.currentData()
         if port:
             s.setValue("connection/port", port)
@@ -633,7 +686,37 @@ class MainWindow(QMainWindow):
     def _apply_rpm_limit(self, limit: int) -> None:
         for spin in (self.target_spin, self.start_spin, self.manual_spin, self.step_spin):
             spin.setMaximum(limit)
+        self.profile_model.set_max_rpm(limit)
         self._refresh_profile_summary()
+
+    def _on_plan_tab_changed(self, index: int) -> None:
+        self.right_stack.setCurrentIndex(1 if index == 1 else 0)
+
+    @property
+    def custom_profile_selected(self) -> bool:
+        return self.plan_tabs.currentIndex() == 1
+
+    def _copy_simple_ramp_to_profile(self) -> None:
+        try:
+            ramp = RampProfile(self._current_ramp_settings())
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid ramp settings", str(exc))
+            return
+        from .profile import EndBehavior, InterpolationMode
+
+        mode = InterpolationMode.STEP if ramp.settings.mode == RampMode.STEPPED else InterpolationMode.LINEAR
+        end = EndBehavior.STOP if ramp.stop_at_end else EndBehavior.HOLD
+        profile = CustomProfile.from_pairs(ramp.to_pairs(), mode=mode, end=end, max_rpm=self.limit_spin.value())
+        self.profile_model.replace(profile)
+        self.profile_canvas.set_selected(-1)
+
+    def _current_schedule(self) -> Union[RampProfile, CustomProfile]:
+        """The schedule described by the active tab; raises ValueError if invalid."""
+        if self.custom_profile_selected:
+            profile = self.profile_model.profile
+            profile.validate()
+            return profile
+        return RampProfile(self._current_ramp_settings())
 
     def _on_status(self, status: ImpellerStatus) -> None:
         if not self.controller_ready:
@@ -653,6 +736,8 @@ class MainWindow(QMainWindow):
 
         t = time.monotonic() - (self.connected_at or time.monotonic())
         self.plot.add_sample(t, None if commanded is None else float(commanded), status.measured_rpm)
+        if isinstance(self.profile, CustomProfile) and self.run_started_at is not None:
+            self.profile_canvas.add_live_sample(time.monotonic() - self.run_started_at, status.measured_rpm)
 
         if self.logger.is_open:
             self.logger.write(self._log_row(status))
@@ -743,16 +828,17 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Controller not ready", "No status has been received from the controller yet.")
             return
         try:
-            settings = self._current_ramp_settings()
-            profile = RampProfile(settings)
+            profile = self._current_schedule()
         except ValueError as exc:
-            QMessageBox.warning(self, "Invalid ramp settings", str(exc))
+            QMessageBox.warning(self, "Invalid schedule", str(exc))
             return
 
         if self.autolog_start_check.isChecked() and not self.logger.is_open:
-            if not self.start_logging(metadata=self._run_metadata(settings)):
+            if not self.start_logging(metadata=self._run_metadata(profile)):
                 return
 
+        if isinstance(profile, CustomProfile):
+            self.profile_canvas.clear_live()
         self.profile = profile
         self.run_started_at = time.monotonic()
         self.run_phase = RampPhase.RAMPING
@@ -779,7 +865,7 @@ class MainWindow(QMainWindow):
             self._last_sent_setpoint = setpoint
 
         if phase == RampPhase.FINISHED:
-            self._end_run(RampPhase.FINISHED, send_stop=self.profile.settings.stop_after_hold)
+            self._end_run(RampPhase.FINISHED, send_stop=self.profile.stop_at_end)
             return
 
         if phase != self.run_phase:
@@ -789,6 +875,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_run_clock(self) -> None:
         text, color = PHASE_STYLE[self.run_phase]
+        if isinstance(self.profile, CustomProfile) and self.run_phase == RampPhase.RAMPING:
+            text = "Following profile"
         self.phase_label.setText(text)
         self.phase_label.setStyleSheet(f"color: {color};")
         if self.run_started_at is None:
@@ -803,10 +891,13 @@ class MainWindow(QMainWindow):
             return
         total = self.profile.total_seconds
         if total is None:
-            self.remaining_label.setText("until Stop" if t >= self.profile.ramp_seconds else _fmt_duration(self.profile.ramp_seconds - t) + " to target")
+            tail = " to end" if isinstance(self.profile, CustomProfile) else " to target"
+            self.remaining_label.setText("until Stop" if t >= self.profile.ramp_seconds else _fmt_duration(self.profile.ramp_seconds - t) + tail)
         else:
             self.remaining_label.setText(_fmt_duration(max(0.0, total - t)))
         self.progress.setValue(int(self.profile.progress_at(t) * 1000))
+        if isinstance(self.profile, CustomProfile):
+            self.profile_canvas.add_live_sample(t, None)  # moves the cursor only
 
     def _end_run(self, phase: RampPhase, send_stop: bool) -> None:
         self.ramp_timer.stop()
@@ -870,14 +961,17 @@ class MainWindow(QMainWindow):
         if folder:
             self.folder_edit.setText(folder)
 
-    def _run_metadata(self, settings: Optional[RampSettings]) -> dict:
+    def _run_metadata(self, schedule: Union[RampProfile, CustomProfile, None]) -> dict:
         meta = {
             "created": datetime.now().isoformat(timespec="seconds"),
             "app_version": __version__,
             "link": self.link.name if self.link else None,
             "setpoint_update_interval_s": self.interval_spin.value(),
         }
-        if settings is not None:
+        if isinstance(schedule, CustomProfile):
+            meta["profile"] = schedule.to_dict()
+        elif isinstance(schedule, RampProfile):
+            settings = schedule.settings
             meta["ramp"] = {
                 "start_rpm": settings.start_rpm,
                 "target_rpm": settings.target_rpm,
@@ -948,6 +1042,9 @@ class MainWindow(QMainWindow):
             widget.setEnabled(not running)
         self.start_spin.setEnabled(not running and not self.start_from_current_check.isChecked())
         self.hold_spin.setEnabled(not running and not self.hold_forever_check.isChecked())
+        self.plan_tabs.tabBar().setEnabled(not running)
+        self.profile_panel.set_editable(not running)
+        self.copy_ramp_button.setEnabled(not running)
         self.log_start_button.setEnabled(connected and not self.logger.is_open)
         self.log_stop_button.setEnabled(self.logger.is_open)
         self.folder_edit.setEnabled(not self.logger.is_open)

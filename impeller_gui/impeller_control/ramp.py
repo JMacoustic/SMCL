@@ -109,6 +109,28 @@ class RampProfile:
     def step_count(self) -> int:
         return self._step_count
 
+    @property
+    def stop_at_end(self) -> bool:
+        """Whether the motor should be stopped when the schedule finishes."""
+        return self.settings.stop_after_hold and self.settings.hold_s is not None
+
+    def to_pairs(self) -> list[tuple[float, float]]:
+        """The schedule as (time, rpm) points, e.g. to seed a custom profile."""
+        s = self.settings
+        pts: list[tuple[float, float]] = []
+        if s.mode == RampMode.STEPPED and self._span > 0:
+            # Stepped: the first step is commanded at t = 0 (use STEP interpolation).
+            for k in range(self._step_count):
+                pts.append((k * s.step_dwell_s, float(self.setpoint_at(k * s.step_dwell_s + 1e-9))))
+        else:
+            pts.append((0.0, float(s.start_rpm)))
+            if self._span > 0:
+                pts.append((self._ramp_s, float(s.target_rpm)))
+        hold = s.hold_s if s.hold_s is not None else 60.0
+        if hold > 0:
+            pts.append((self._ramp_s + hold, float(s.target_rpm)))
+        return pts
+
     # -------------------------------------------------------------- schedule
     def setpoint_at(self, t: float) -> int:
         if t <= 0 or self._span == 0:
