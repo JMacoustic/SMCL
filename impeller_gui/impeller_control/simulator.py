@@ -90,8 +90,8 @@ class SimulatedImpellerLink(ImpellerLink):
                 value = int(command[1:])
             except ValueError:
                 value = -1
-            if not (50 <= value <= 5000):
-                self._outbox.append("ERR status interval must be R50-R5000")
+            if not (100 <= value <= 5000):
+                self._outbox.append("ERR status interval must be R100-R5000")
                 return
             self._status_interval_s = value / 1000.0
             self._outbox.append(self._status_line())

@@ -62,7 +62,7 @@ arduino-cli upload  --fqbn arduino:avr:nano --port COM12 src/arduino_codes/impel
 | `MAX_TARGET_RPM` | 700 | 받아들이는 최대 목표 RPM |
 | `RPM_OVERSPEED_STOP_RPM` | 750 | 이 속도를 넘으면 스스로 정지 |
 | `SERIAL_COMMAND_TIMEOUT_MS` | 2500 | 모터가 도는 동안 2.5초간 PC 명령이 없으면 안전 정지 |
-| `DEFAULT_STATUS_INTERVAL_MS` | 100 | 상태 줄 전송 주기. PC에서 `R<ms>`(50~5000)로 바꿀 수 있음 |
+| `DEFAULT_STATUS_INTERVAL_MS` | 100 | 상태 줄 전송 주기. PC에서 `R<ms>`(100~5000)로 바꿀 수 있음. 하한은 RPM 재계산 주기와 같음 |
 | `RPM_SAMPLE_INTERVAL_MS` / `RPM_CALC_WINDOW_MS` | 100 / 1000 | RPM 재계산 주기와 이동 평균 창 |
 | `RPM_CALIB_*` | 보정표 | 엔코더 RPM → 실제 RPM 변환. 임펠러·엔코더를 바꾸면 `encoder/` 스케치와 `calibration.py`로 다시 측정 |
 | `USE_FIXED_TARGET_OUTPUT_TABLE` | `false` | `true`면 PID를 끄고 고정 출력표만 사용(보정 실험용). 평소에는 반드시 `false` |
@@ -135,7 +135,7 @@ arduino-cli upload  --fqbn arduino:avr:nano --port COM12 src/arduino_codes/impel
 
 실행 중에는 그래프 위에 **측정 RPM(빨간 선)**과 현재 시각(초록 점선)이 함께 그려져 계획과 실제를 바로 비교할 수 있습니다. 실행 중 편집은 잠깁니다.
 
-**공통 설정(3. Run 안)**: **Max speed**는 두 탭 모두에 적용되는 상한(기본 700)이고, **Update every**는 중간 목표를 보드에 보내는 간격(기본 0.5 s)입니다. **Controller reports every**는 보드가 상태 줄(= CSV 행)을 보내는 주기(50~5000 ms, 기본 100 ms)로, 연결 시와 값을 바꿀 때 `R<ms>` 명령으로 보드에 전달됩니다. 보드가 실제로 쓰는 값이 옆에 표시됩니다.
+**공통 설정(3. Run 안)**: **Max speed**는 두 탭 모두에 적용되는 상한(기본 700)이고, **Update every**는 중간 목표를 보드에 보내는 간격(기본 0.5 s)입니다. **Controller reports every**는 보드가 상태 줄(= CSV 행)을 보내는 주기(100~5000 ms, 기본 100 ms)로, 연결 시와 값을 바꿀 때 `R<ms>` 명령으로 보드에 전달됩니다. 보드가 실제로 쓰는 값이 옆에 표시됩니다.
 
 ### ③ 2. CSV logging — 어디에 기록할지
 - **Folder**, **File prefix**를 정합니다. 파일명은 `접두어_YYYYMMDD_HHMMSS.csv`이고 기존 파일을 덮어쓰지 않습니다.

@@ -146,8 +146,8 @@ class ImpellerLink:
     def set_status_interval_ms(self, interval_ms: int) -> None:
         """Ask the firmware to print status every ``interval_ms`` (``R`` command, newer firmware)."""
         interval_ms = int(interval_ms)
-        if not (50 <= interval_ms <= 5000):
-            raise ValueError("status interval must be 50..5000 ms")
+        if not (100 <= interval_ms <= 5000):
+            raise ValueError("status interval must be 100..5000 ms")
         self._send(f"R{interval_ms}")
 
     def poll(self) -> list[str]:

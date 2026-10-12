@@ -375,7 +375,7 @@ class MainWindow(QMainWindow):
 
         rate_row = QHBoxLayout()
         self.status_ms_spin = QSpinBox()
-        self.status_ms_spin.setRange(50, 5000)
+        self.status_ms_spin.setRange(100, 5000)
         self.status_ms_spin.setSingleStep(50)
         self.status_ms_spin.setSuffix(" ms")
         self.status_ms_spin.setValue(DEFAULT_STATUS_INTERVAL_MS)

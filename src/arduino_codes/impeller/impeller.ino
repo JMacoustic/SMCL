@@ -9,7 +9,7 @@
   Serial control at 115200 baud:
     T<rpm>  Set integer target RPM. T0 stops the motor.
     O<pct>  Hold fixed safe output strength for calibration. O0 stops.
-    R<ms>   Set the status line interval (50-5000 ms, default 100).
+    R<ms>   Set the status line interval (100-5000 ms, default 100).
     P<kp>   Set PID proportional gain.
     I<ki>   Set PID integral gain.
     D<kd>   Set PID derivative gain.
@@ -52,7 +52,8 @@ const uint8_t RPM_HISTORY_SIZE = 12;
 const float RPM_EMA_ALPHA = 0.65f;
 const unsigned long PID_INTERVAL_MS = 100UL;
 const unsigned long DEFAULT_STATUS_INTERVAL_MS = 100UL;
-const unsigned long MIN_STATUS_INTERVAL_MS = 50UL;
+// Not below RPM_SAMPLE_INTERVAL_MS: faster reports would only repeat the same RPM value.
+const unsigned long MIN_STATUS_INTERVAL_MS = RPM_SAMPLE_INTERVAL_MS;
 const unsigned long MAX_STATUS_INTERVAL_MS = 5000UL;
 const unsigned long SERIAL_COMMAND_TIMEOUT_MS = 2500UL;
 

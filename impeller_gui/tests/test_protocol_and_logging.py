@@ -123,7 +123,7 @@ class SimulatorTests(unittest.TestCase):
             time.sleep(0.02)
         self.assertTrue(1 <= count <= 3, count)  # ~2 periodic lines per second at R500
         with self.assertRaises(ValueError):
-            link.set_status_interval_ms(10)
+            link.set_status_interval_ms(50)
         link.disconnect()
         self.assertFalse(link.is_connected)
 

@@ -118,7 +118,7 @@ Settings shared by both tabs live in the **3. Run** box: **Max speed** (the
 highest target the program will send, default 700) and **Update every** (how
 often an intermediate target is sent, 0.5 s is a good default, see notes),
 and **Controller reports every** (how often the firmware prints a status line,
-i.e. one CSV row; 50–5000 ms, default 100 ms; sent to the board as `R<ms>` on
+i.e. one CSV row; 100–5000 ms, default 100 ms; sent to the board as `R<ms>` on
 connect and whenever changed, the value the board confirms is shown next to it).
 
 ### 2. CSV logging
