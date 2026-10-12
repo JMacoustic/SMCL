@@ -33,6 +33,7 @@ class SimulatedImpellerLink(ImpellerLink):
         # line for longer than this stops the motor.
         self.command_timeout_s = command_timeout_s
         self._last_command = 0.0
+        self._t0 = 0.0
         self._rng = random.Random(seed)
         self._target = 0
         self._rpm = 0.0
@@ -52,6 +53,7 @@ class SimulatedImpellerLink(ImpellerLink):
         self._last_update = now
         self._last_status = now
         self._last_command = now
+        self._t0 = now
         self._outbox = [
             "Impeller PID controller ready. (SIMULATED)",
             "Encoder: A->D2, B->D3. PWM: D9 / OC1A.",
@@ -118,8 +120,10 @@ class SimulatedImpellerLink(ImpellerLink):
         measured = max(0.0, self._rpm + noise * 0.3)
         raw = max(0.0, self._rpm + noise)
         output = 0.0 if self._target == 0 else min(100.0, 100.0 * self._rpm / 760.0)
+        now_ms = int((time.monotonic() - self._t0) * 1000)
         return (
-            f"OK target_rpm={self._target} measured_rpm={measured:.0f} raw_rpm={raw:.0f} "
+            f"OK t_ms={now_ms} rpm_t_ms={now_ms - now_ms % 250} "
+            f"target_rpm={self._target} measured_rpm={measured:.0f} raw_rpm={raw:.0f} "
             f"output={output:.2f} kp=0.0700 ki=0.0200 kd=0.0030 strength={output:.3f} "
             f"calib_points=10 pulse_ticks=0 period_ticks=0 pulse_ns=0 rest_us=0 period_us=0 "
             f"duty_ppm=0 max_duty_ppm=70000"

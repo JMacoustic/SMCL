@@ -79,6 +79,7 @@ class MainWindow(QMainWindow):
         self.controller_ready = False
         self._last_status_stamp: Optional[float] = None
         self._last_sent_setpoint: Optional[int] = None
+        self._last_command_at = 0.0  # monotonic time of the last command written to the link
 
         self.poll_timer = QTimer(self)
         self.poll_timer.setInterval(POLL_INTERVAL_MS)
@@ -678,8 +679,11 @@ class MainWindow(QMainWindow):
             return
         if not self.link.commanded_rpm:
             return
+        if time.monotonic() - self._last_command_at < KEEPALIVE_INTERVAL_MS / 1000.0:
+            return  # a target was sent recently; that already counts as a command
         try:
             self.link.request_status()
+            self._last_command_at = time.monotonic()
         except LinkError as exc:
             self._handle_link_lost(exc)
 
@@ -745,8 +749,12 @@ class MainWindow(QMainWindow):
 
     def _log_row(self, status: ImpellerStatus) -> dict:
         run_elapsed = None if self.run_started_at is None else time.monotonic() - self.run_started_at
+        t_ms = status.fields.get("t_ms")
+        rpm_t_ms = status.fields.get("rpm_t_ms")
         return {
             "run_elapsed_s": None if run_elapsed is None else round(run_elapsed, 3),
+            "controller_time_s": None if t_ms is None else round(t_ms / 1000.0, 3),
+            "controller_rpm_time_s": None if rpm_t_ms is None else round(rpm_t_ms / 1000.0, 3),
             "phase": self.run_phase.value,
             "commanded_rpm": self.link.commanded_rpm if self.link else None,
             "controller_target_rpm": status.target_rpm,
@@ -937,6 +945,7 @@ class MainWindow(QMainWindow):
             return False
         try:
             self.link.set_target_rpm(rpm)
+            self._last_command_at = time.monotonic()
         except (LinkError, ValueError) as exc:
             self._handle_link_lost(exc)
             return False
@@ -949,6 +958,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.link.stop()
+            self._last_command_at = time.monotonic()
         except LinkError as exc:
             self._handle_link_lost(exc)
             return

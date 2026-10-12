@@ -155,7 +155,7 @@ arduino-cli upload  --fqbn arduino:avr:nano --port COM12 src/arduino_codes/impel
 
 ## 6. CSV 열 설명
 
-보드가 상태를 보낼 때마다 한 행이 기록됩니다 (초당 2~3행).
+보드가 상태를 보낼 때마다 한 행이 기록됩니다. 보드는 0.5 s마다 한 줄을 보내고, 명령(`T`, `?`)을 받을 때마다 한 줄을 더 보내므로 행 간격은 균일하지 않습니다. 시간 축이 필요하면 PC 수신 시각(`timestamp`)보다 보드 시계인 `controller_time_s`를 쓰고, 같은 `controller_rpm_time_s`를 가진 행은 중복 측정값이므로 하나만 남기면 됩니다.
 
 | 열 | 설명 |
 |---|---|
@@ -163,6 +163,8 @@ arduino-cli upload  --fqbn arduino:avr:nano --port COM12 src/arduino_codes/impel
 | `unix_time_s` | 같은 시각의 Unix 초 |
 | `log_elapsed_s` | 이 파일을 연 뒤 경과 초 |
 | `run_elapsed_s` | Start ramp를 누른 뒤 경과 초 (실행 전이면 빈칸) |
+| `controller_time_s` | 보드가 그 상태 줄을 보낸 순간의 보드 시계(`millis()`/1000). PC 수신 지연과 무관한 정확한 시각이며, **시간 축으로는 이 열을 쓰세요** |
+| `controller_rpm_time_s` | 그 행의 RPM 값이 마지막으로 계산된 보드 시계. RPM은 0.25 s마다만 갱신되므로 이 값이 같은 행들은 같은 측정값입니다 |
 | `phase` | `idle` / `ramping`(프로파일 추종 중 포함) / `holding` / `finished` / `stopped` |
 | `commanded_rpm` | 프로그램이 마지막으로 보낸 목표 |
 | `controller_target_rpm` | 보드가 현재 쓰는 목표 |

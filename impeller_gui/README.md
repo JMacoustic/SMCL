@@ -151,6 +151,8 @@ settings for next time.
 | `unix_time_s` | Same instant as Unix seconds. |
 | `log_elapsed_s` | Seconds since this file was opened. |
 | `run_elapsed_s` | Seconds since **Start ramp** was pressed (blank before any run). |
+| `controller_time_s` | The Arduino's own clock (`millis()`/1000) when it printed the line. Independent of PC latency; **use this as the time axis**. |
+| `controller_rpm_time_s` | Arduino clock of the last RPM calculation. RPM updates every 0.25 s, so rows sharing this value repeat the same measurement. |
 | `phase` | `idle`, `ramping`, `holding`, `finished` or `stopped`. |
 | `commanded_rpm` | Last target sent by this program. |
 | `controller_target_rpm` | Target the Arduino reports it is using. |
@@ -161,7 +163,10 @@ settings for next time.
 | `kp`, `ki`, `kd` | Controller gains. |
 | `controller_setpoint_rpm`, `encoder_rpm`, `feedforward_percent`, `d_rpm_s`, `hold`, `open_loop` | Extra fields from newer firmware; blank if the sketch does not report them. |
 
-One row is written per status line from the controller, i.e. every 0.5 s.
+One row is written per status line from the controller. The firmware prints a
+line every 0.5 s and one more after every command it receives (`T`, `?`), so
+row spacing is not uniform; use `controller_time_s` as the time axis and drop
+rows that share a `controller_rpm_time_s` if you want one row per measurement.
 
 ## 5. Notes and limits
 

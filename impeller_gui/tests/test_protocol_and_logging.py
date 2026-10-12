@@ -10,7 +10,7 @@ from impeller_control.protocol import ImpellerLink, LinkError, format_target_com
 from impeller_control.simulator import SimulatedImpellerLink
 
 STATUS_LINE = (
-    "OK target_rpm=300 measured_rpm=298 raw_rpm=301 output=42.10 kp=0.0700 ki=0.0200 kd=0.0030 "
+    "OK t_ms=123456 rpm_t_ms=123250 target_rpm=300 measured_rpm=298 raw_rpm=301 output=42.10 kp=0.0700 ki=0.0200 kd=0.0030 "
     "strength=42.100 calib_points=10 pulse_ticks=56 period_ticks=1600 pulse_ns=3500 rest_us=97 "
     "period_us=100 duty_ppm=35000 max_duty_ppm=70000"
 )
@@ -28,6 +28,8 @@ class ParseTests(unittest.TestCase):
         self.assertAlmostEqual(status.kp, 0.07)
         self.assertEqual(status.updated_at, 123.0)
         self.assertEqual(status.fields["max_duty_ppm"], 70000.0)
+        self.assertEqual(status.fields["t_ms"], 123456.0)
+        self.assertEqual(status.fields["rpm_t_ms"], 123250.0)
 
     def test_ignores_non_status_lines(self):
         self.assertIsNone(parse_status_line("Impeller PID controller ready."))
@@ -98,6 +100,8 @@ class SimulatorTests(unittest.TestCase):
         lines = link.poll()
         self.assertTrue(any("SIMULATED" in line for line in lines))
         self.assertEqual(link.status.target_rpm, 0)
+        self.assertIn("t_ms", link.status.fields)
+        self.assertIn("rpm_t_ms", link.status.fields)
 
         link.set_target_rpm(400)
         link.poll()
@@ -134,7 +138,7 @@ class CsvLoggerTests(unittest.TestCase):
             path = make_log_path(folder, "test")
             logger = CsvLogger()
             logger.open(path, metadata={"ramp": {"target_rpm": 300}})
-            logger.write({"phase": "ramping", "commanded_rpm": 120, "measured_rpm": 118.0, "kp": 0.07})
+            logger.write({"phase": "ramping", "commanded_rpm": 120, "measured_rpm": 118.0, "kp": 0.07, "controller_time_s": 12.345})
             logger.write({"phase": "holding", "commanded_rpm": 300, "measured_rpm": 299.5})
             self.assertEqual(logger.rows_written, 2)
             closed = logger.close()
@@ -148,6 +152,8 @@ class CsvLoggerTests(unittest.TestCase):
             self.assertEqual(rows[0]["commanded_rpm"], "120")
             self.assertEqual(rows[0]["measured_rpm"], "118")
             self.assertEqual(rows[0]["kp"], "0.07")
+            self.assertEqual(rows[0]["controller_time_s"], "12.345")
+            self.assertEqual(rows[1]["controller_time_s"], "")
             self.assertEqual(rows[1]["measured_rpm"], "299.5")
             self.assertEqual(rows[1]["run_elapsed_s"], "")
             self.assertTrue(rows[0]["timestamp"])

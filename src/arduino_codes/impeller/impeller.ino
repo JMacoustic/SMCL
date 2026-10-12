@@ -15,6 +15,9 @@
     S0      Stop the motor.
     ?       Print current status.
 
+  Status lines start with "OK t_ms=<millis> rpm_t_ms=<millis of last RPM sample>"
+  so a PC logger can timestamp samples with the controller's own clock.
+
   The PWM safety boundary is enforced on Arduino:
     - High pulse width is clamped between MIN_PULSE_WIDTH_NS and MAX_PULSE_WIDTH_NS.
     - Effective duty is clamped to the measured original impeller range.
@@ -989,7 +992,13 @@ void printPeriodicStatus() {
 }
 
 void printStatus() {
-  Serial.print("OK target_rpm=");
+  // t_ms: controller clock when this line was printed; rpm_t_ms: clock of the
+  // last RPM calculation (RPM values only change every RPM_SAMPLE_INTERVAL_MS).
+  Serial.print("OK t_ms=");
+  Serial.print(millis());
+  Serial.print(" rpm_t_ms=");
+  Serial.print(lastRpmSampleMs);
+  Serial.print(" target_rpm=");
   Serial.print(targetRpm);
   Serial.print(" setpoint_rpm=");
   printRoundedRpm(pidSetpointRpm);

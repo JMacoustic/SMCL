@@ -14,6 +14,8 @@ COLUMNS = [
     "unix_time_s",
     "log_elapsed_s",  # seconds since this log file was opened
     "run_elapsed_s",  # seconds since the current ramp run started (blank if idle)
+    "controller_time_s",  # Arduino millis()/1000 when the status line was printed (newer firmware)
+    "controller_rpm_time_s",  # Arduino clock of the last RPM calculation (newer firmware)
     "phase",  # idle / ramping / holding / finished / stopped
     "commanded_rpm",  # last target sent by this program
     "controller_target_rpm",  # target echoed by the Arduino
