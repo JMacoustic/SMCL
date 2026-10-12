@@ -62,6 +62,8 @@ arduino-cli upload  --fqbn arduino:avr:nano --port COM12 src/arduino_codes/impel
 | `MAX_TARGET_RPM` | 700 | 받아들이는 최대 목표 RPM |
 | `RPM_OVERSPEED_STOP_RPM` | 750 | 이 속도를 넘으면 스스로 정지 |
 | `SERIAL_COMMAND_TIMEOUT_MS` | 2500 | 모터가 도는 동안 2.5초간 PC 명령이 없으면 안전 정지 |
+| `DEFAULT_STATUS_INTERVAL_MS` | 100 | 상태 줄 전송 주기. PC에서 `R<ms>`(50~5000)로 바꿀 수 있음 |
+| `RPM_SAMPLE_INTERVAL_MS` / `RPM_CALC_WINDOW_MS` | 100 / 1000 | RPM 재계산 주기와 이동 평균 창 |
 | `RPM_CALIB_*` | 보정표 | 엔코더 RPM → 실제 RPM 변환. 임펠러·엔코더를 바꾸면 `encoder/` 스케치와 `calibration.py`로 다시 측정 |
 | `USE_FIXED_TARGET_OUTPUT_TABLE` | `false` | `true`면 PID를 끄고 고정 출력표만 사용(보정 실험용). 평소에는 반드시 `false` |
 
@@ -133,7 +135,7 @@ arduino-cli upload  --fqbn arduino:avr:nano --port COM12 src/arduino_codes/impel
 
 실행 중에는 그래프 위에 **측정 RPM(빨간 선)**과 현재 시각(초록 점선)이 함께 그려져 계획과 실제를 바로 비교할 수 있습니다. 실행 중 편집은 잠깁니다.
 
-**공통 설정(3. Run 안)**: **Max speed**는 두 탭 모두에 적용되는 상한(기본 700)이고, **Update every**는 중간 목표를 보드에 보내는 간격(기본 0.5 s)입니다.
+**공통 설정(3. Run 안)**: **Max speed**는 두 탭 모두에 적용되는 상한(기본 700)이고, **Update every**는 중간 목표를 보드에 보내는 간격(기본 0.5 s)입니다. **Controller reports every**는 보드가 상태 줄(= CSV 행)을 보내는 주기(50~5000 ms, 기본 100 ms)로, 연결 시와 값을 바꿀 때 `R<ms>` 명령으로 보드에 전달됩니다. 보드가 실제로 쓰는 값이 옆에 표시됩니다.
 
 ### ③ 2. CSV logging — 어디에 기록할지
 - **Folder**, **File prefix**를 정합니다. 파일명은 `접두어_YYYYMMDD_HHMMSS.csv`이고 기존 파일을 덮어쓰지 않습니다.
@@ -155,7 +157,7 @@ arduino-cli upload  --fqbn arduino:avr:nano --port COM12 src/arduino_codes/impel
 
 ## 6. CSV 열 설명
 
-보드가 상태를 보낼 때마다 한 행이 기록됩니다. 보드는 0.5 s마다 한 줄을 보내고, 명령(`T`, `?`)을 받을 때마다 한 줄을 더 보내므로 행 간격은 균일하지 않습니다. 시간 축이 필요하면 PC 수신 시각(`timestamp`)보다 보드 시계인 `controller_time_s`를 쓰고, 같은 `controller_rpm_time_s`를 가진 행은 중복 측정값이므로 하나만 남기면 됩니다.
+보드가 상태를 보낼 때마다 한 행이 기록됩니다. 보드는 **Controller reports every**에 정한 주기(기본 100 ms)마다 한 줄을 보내고, 명령(`T`, `?`, `R`)을 받을 때마다 한 줄을 더 보내므로 행 간격은 완전히 균일하지는 않습니다. RPM 값은 100 ms마다 1초 이동 평균으로 다시 계산됩니다. 시간 축이 필요하면 PC 수신 시각(`timestamp`)보다 보드 시계인 `controller_time_s`를 쓰고, 같은 `controller_rpm_time_s`를 가진 행은 중복 측정값이므로 하나만 남기면 됩니다.
 
 | 열 | 설명 |
 |---|---|
@@ -164,7 +166,7 @@ arduino-cli upload  --fqbn arduino:avr:nano --port COM12 src/arduino_codes/impel
 | `log_elapsed_s` | 이 파일을 연 뒤 경과 초 |
 | `run_elapsed_s` | Start ramp를 누른 뒤 경과 초 (실행 전이면 빈칸) |
 | `controller_time_s` | 보드가 그 상태 줄을 보낸 순간의 보드 시계(`millis()`/1000). PC 수신 지연과 무관한 정확한 시각이며, **시간 축으로는 이 열을 쓰세요** |
-| `controller_rpm_time_s` | 그 행의 RPM 값이 마지막으로 계산된 보드 시계. RPM은 0.25 s마다만 갱신되므로 이 값이 같은 행들은 같은 측정값입니다 |
+| `controller_rpm_time_s` | 그 행의 RPM 값이 마지막으로 계산된 보드 시계. RPM은 0.1 s마다만 갱신되므로 이 값이 같은 행들은 같은 측정값입니다 |
 | `phase` | `idle` / `ramping`(프로파일 추종 중 포함) / `holding` / `finished` / `stopped` |
 | `commanded_rpm` | 프로그램이 마지막으로 보낸 목표 |
 | `controller_target_rpm` | 보드가 현재 쓰는 목표 |

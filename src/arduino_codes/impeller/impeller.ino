@@ -9,6 +9,7 @@
   Serial control at 115200 baud:
     T<rpm>  Set integer target RPM. T0 stops the motor.
     O<pct>  Hold fixed safe output strength for calibration. O0 stops.
+    R<ms>   Set the status line interval (50-5000 ms, default 100).
     P<kp>   Set PID proportional gain.
     I<ki>   Set PID integral gain.
     D<kd>   Set PID derivative gain.
@@ -44,12 +45,15 @@ const float RPM_CALIB_REFERENCE[RPM_CALIB_POINT_COUNT] = {
 
 const uint16_t MAX_TARGET_RPM = 700;
 
-const unsigned long RPM_SAMPLE_INTERVAL_MS = 250UL;
+const unsigned long RPM_SAMPLE_INTERVAL_MS = 100UL;
 const unsigned long RPM_CALC_WINDOW_MS = 1000UL;
-const uint8_t RPM_HISTORY_SIZE = 8;
+// Must hold at least RPM_CALC_WINDOW_MS / RPM_SAMPLE_INTERVAL_MS + 1 samples.
+const uint8_t RPM_HISTORY_SIZE = 12;
 const float RPM_EMA_ALPHA = 0.65f;
 const unsigned long PID_INTERVAL_MS = 100UL;
-const unsigned long STATUS_INTERVAL_MS = 500UL;
+const unsigned long DEFAULT_STATUS_INTERVAL_MS = 100UL;
+const unsigned long MIN_STATUS_INTERVAL_MS = 50UL;
+const unsigned long MAX_STATUS_INTERVAL_MS = 5000UL;
 const unsigned long SERIAL_COMMAND_TIMEOUT_MS = 2500UL;
 
 const float DEFAULT_PID_KP = 0.055f;
@@ -112,6 +116,7 @@ volatile uint8_t lastEncoderState = 0;
 unsigned long lastRpmSampleMs = 0;
 unsigned long lastPidMs = 0;
 unsigned long lastStatusMs = 0;
+unsigned long statusIntervalMs = DEFAULT_STATUS_INTERVAL_MS;
 unsigned long lastSerialCommandMs = 0;
 
 unsigned long countSampleTimes[RPM_HISTORY_SIZE];
@@ -585,6 +590,23 @@ void processCommand(char *command) {
     return;
   }
 
+  if (command[0] == 'R' || command[0] == 'r') {
+    uint16_t value;
+    if (!parseNonNegativeInteger(command + 1, &value) ||
+        value < MIN_STATUS_INTERVAL_MS || value > MAX_STATUS_INTERVAL_MS) {
+      Serial.print("ERR status interval must be R");
+      Serial.print(MIN_STATUS_INTERVAL_MS);
+      Serial.print("-R");
+      Serial.println(MAX_STATUS_INTERVAL_MS);
+      return;
+    }
+
+    markValidSerialCommand();
+    statusIntervalMs = value;
+    printStatus();
+    return;
+  }
+
   if (command[0] == 'O' || command[0] == 'o') {
     float value;
     if (!parseNonNegativeFloat(command + 1, &value) || value > 100.0f) {
@@ -624,7 +646,7 @@ void processCommand(char *command) {
     return;
   }
 
-  Serial.println("ERR use T<rpm>, O<pct>, P<kp>, I<ki>, D<kd>, S0, or ?");
+  Serial.println("ERR use T<rpm>, O<pct>, R<ms>, P<kp>, I<ki>, D<kd>, S0, or ?");
 }
 
 void markValidSerialCommand() {
@@ -983,7 +1005,7 @@ float maxFloat(float a, float b) {
 
 void printPeriodicStatus() {
   const unsigned long now = millis();
-  if (now - lastStatusMs < STATUS_INTERVAL_MS) {
+  if (now - lastStatusMs < statusIntervalMs) {
     return;
   }
 
@@ -1026,6 +1048,8 @@ void printStatus() {
   Serial.print(controlFeedforwardForRpm((float)targetRpm), 2);
   Serial.print(" strength=");
   printMilliPercent(pwmStrengthMilliPercent);
+  Serial.print(" status_ms=");
+  Serial.print(statusIntervalMs);
   Serial.print(" calib_points=");
   Serial.print(RPM_CALIB_POINT_COUNT);
   Serial.print(" pulse_ticks=");

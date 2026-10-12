@@ -143,6 +143,13 @@ class ImpellerLink:
     def request_status(self) -> None:
         self._send("?")
 
+    def set_status_interval_ms(self, interval_ms: int) -> None:
+        """Ask the firmware to print status every ``interval_ms`` (``R`` command, newer firmware)."""
+        interval_ms = int(interval_ms)
+        if not (50 <= interval_ms <= 5000):
+            raise ValueError("status interval must be 50..5000 ms")
+        self._send(f"R{interval_ms}")
+
     def poll(self) -> list[str]:
         """Read whatever is available, parse status lines, return complete text lines."""
         if not self._connected:

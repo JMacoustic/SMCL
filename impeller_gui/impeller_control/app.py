@@ -52,6 +52,7 @@ STALE_STATUS_S = 3.0
 # (Re-sending T<rpm> would also work but resets the firmware's PID integral.)
 KEEPALIVE_INTERVAL_MS = 1000
 DEFAULT_RPM_LIMIT = 700  # MAX_TARGET_RPM in the currently flashed impeller.ino
+DEFAULT_STATUS_INTERVAL_MS = 100  # how often the firmware prints a status line (R command)
 LIMIT_ERROR_RE = re.compile(r"ERR use T0-T(\d+)")
 
 PHASE_STYLE = {
@@ -371,6 +372,25 @@ class MainWindow(QMainWindow):
         common.addWidget(QLabel("Update every"))
         common.addWidget(self.interval_spin, 1)
         layout.addLayout(common)
+
+        rate_row = QHBoxLayout()
+        self.status_ms_spin = QSpinBox()
+        self.status_ms_spin.setRange(50, 5000)
+        self.status_ms_spin.setSingleStep(50)
+        self.status_ms_spin.setSuffix(" ms")
+        self.status_ms_spin.setValue(DEFAULT_STATUS_INTERVAL_MS)
+        self.status_ms_spin.setToolTip(
+            "How often the controller reports its status (one CSV row per report).\n"
+            "Sent to the firmware as R<ms> on connect and whenever you change it.\n"
+            "The RPM value itself is recomputed every 100 ms over a 1 s window."
+        )
+        rate_row.addWidget(QLabel("Controller reports every"))
+        rate_row.addWidget(self.status_ms_spin, 1)
+        self.status_ms_label = QLabel("")
+        self.status_ms_label.setStyleSheet("color: #666666;")
+        rate_row.addWidget(self.status_ms_label)
+        layout.addLayout(rate_row)
+        self.status_ms_spin.valueChanged.connect(self._status_rate_changed)
         self.limit_spin.valueChanged.connect(self._apply_rpm_limit)
 
         manual_row = QHBoxLayout()
@@ -450,7 +470,7 @@ class MainWindow(QMainWindow):
         group = QGroupBox("Controller messages")
         layout = QVBoxLayout(group)
         top = QHBoxLayout()
-        self.show_status_check = QCheckBox("Show every status line (2 per second)")
+        self.show_status_check = QCheckBox("Show every status line")
         self.clear_console_button = QPushButton("Clear")
         top.addWidget(self.show_status_check)
         top.addStretch(1)
@@ -492,6 +512,7 @@ class MainWindow(QMainWindow):
         self.autolog_stop_check.setChecked(_as_bool(s.value("log/auto_stop", True)))
         self.show_status_check.setChecked(_as_bool(s.value("console/show_status", False)))
         self.manual_spin.setValue(int(s.value("manual/target", 0)))
+        self.status_ms_spin.setValue(int(s.value("controller/status_ms", DEFAULT_STATUS_INTERVAL_MS)))
         profile_json = s.value("profile/json")
         if profile_json:
             try:
@@ -533,6 +554,7 @@ class MainWindow(QMainWindow):
         s.setValue("log/auto_stop", self.autolog_stop_check.isChecked())
         s.setValue("console/show_status", self.show_status_check.isChecked())
         s.setValue("manual/target", self.manual_spin.value())
+        s.setValue("controller/status_ms", self.status_ms_spin.value())
         s.setValue("profile/json", self.profile_model.profile.to_json())
         s.setValue("profile/snap_t", self.profile_panel.snap_t_spin.value())
         s.setValue("profile/snap_rpm", self.profile_panel.snap_rpm_spin.value())
@@ -687,6 +709,21 @@ class MainWindow(QMainWindow):
         except LinkError as exc:
             self._handle_link_lost(exc)
 
+    def _status_rate_changed(self, _value: int) -> None:
+        if self.link is not None and self.controller_ready:
+            self._send_status_rate()
+
+    def _send_status_rate(self) -> None:
+        if self.link is None:
+            return
+        try:
+            self.link.set_status_interval_ms(self.status_ms_spin.value())
+            self._last_command_at = time.monotonic()
+        except LinkError as exc:
+            self._handle_link_lost(exc)
+            return
+        self._console("tx", f"R{self.status_ms_spin.value()}")
+
     def _apply_rpm_limit(self, limit: int) -> None:
         for spin in (self.target_spin, self.start_spin, self.manual_spin, self.step_spin):
             spin.setMaximum(limit)
@@ -729,8 +766,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Controller is responding. Set the ramp and press Start.")
             self._refresh_profile_summary()
             self._update_ui_state()
+            self._send_status_rate()
         elif self.connection_label.text().startswith("No status"):
             self._set_connection_indicator("#1a8f3c", f"Ready - {self.link.name}")
+        reported = status.fields.get("status_ms")
+        self.status_ms_label.setText("" if reported is None else f"(controller: {reported:.0f} ms)")
 
         self.measured_label.setText("--" if status.measured_rpm is None else f"{status.measured_rpm:.0f}")
         self.controller_target_label.setText("--" if status.target_rpm is None else f"{status.target_rpm}")
@@ -977,6 +1017,7 @@ class MainWindow(QMainWindow):
             "app_version": __version__,
             "link": self.link.name if self.link else None,
             "setpoint_update_interval_s": self.interval_spin.value(),
+            "status_interval_ms": self.status_ms_spin.value(),
         }
         if isinstance(schedule, CustomProfile):
             meta["profile"] = schedule.to_dict()

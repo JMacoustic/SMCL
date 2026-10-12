@@ -16,7 +16,7 @@ from .ramp import CONTROLLER_MAX_RPM
 
 
 class SimulatedImpellerLink(ImpellerLink):
-    STATUS_INTERVAL_S = 0.5
+    DEFAULT_STATUS_INTERVAL_S = 0.1
 
     def __init__(
         self,
@@ -34,6 +34,7 @@ class SimulatedImpellerLink(ImpellerLink):
         self.command_timeout_s = command_timeout_s
         self._last_command = 0.0
         self._t0 = 0.0
+        self._status_interval_s = self.DEFAULT_STATUS_INTERVAL_S
         self._rng = random.Random(seed)
         self._target = 0
         self._rpm = 0.0
@@ -54,6 +55,7 @@ class SimulatedImpellerLink(ImpellerLink):
         self._last_status = now
         self._last_command = now
         self._t0 = now
+        self._status_interval_s = self.DEFAULT_STATUS_INTERVAL_S
         self._outbox = [
             "Impeller PID controller ready. (SIMULATED)",
             "Encoder: A->D2, B->D3. PWM: D9 / OC1A.",
@@ -83,8 +85,18 @@ class SimulatedImpellerLink(ImpellerLink):
         elif command == "S0":
             self._target = 0
             self._outbox.append(self._status_line())
+        elif command[:1] in ("R", "r"):
+            try:
+                value = int(command[1:])
+            except ValueError:
+                value = -1
+            if not (50 <= value <= 5000):
+                self._outbox.append("ERR status interval must be R50-R5000")
+                return
+            self._status_interval_s = value / 1000.0
+            self._outbox.append(self._status_line())
         else:
-            self._outbox.append("ERR use T<rpm>, P<kp>, I<ki>, D<kd>, S0, or ?")
+            self._outbox.append("ERR use T<rpm>, O<pct>, R<ms>, P<kp>, I<ki>, D<kd>, S0, or ?")
 
     def _read_available(self) -> str:
         self._advance()
@@ -111,7 +123,7 @@ class SimulatedImpellerLink(ImpellerLink):
             self._target = 0
             self._outbox.append("ERR command timeout; stopped motor")
             self._outbox.append(self._status_line())
-        if now - self._last_status >= self.STATUS_INTERVAL_S:
+        if now - self._last_status >= self._status_interval_s:
             self._last_status = now
             self._outbox.append(self._status_line())
 
@@ -125,6 +137,7 @@ class SimulatedImpellerLink(ImpellerLink):
             f"OK t_ms={now_ms} rpm_t_ms={now_ms - now_ms % 250} "
             f"target_rpm={self._target} measured_rpm={measured:.0f} raw_rpm={raw:.0f} "
             f"output={output:.2f} kp=0.0700 ki=0.0200 kd=0.0030 strength={output:.3f} "
+            f"status_ms={int(self._status_interval_s * 1000)} "
             f"calib_points=10 pulse_ticks=0 period_ticks=0 pulse_ns=0 rest_us=0 period_us=0 "
             f"duty_ppm=0 max_duty_ppm=70000"
         )

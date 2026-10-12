@@ -116,7 +116,10 @@ the planned curve, and editing is locked.
 
 Settings shared by both tabs live in the **3. Run** box: **Max speed** (the
 highest target the program will send, default 700) and **Update every** (how
-often an intermediate target is sent, 0.5 s is a good default, see notes).
+often an intermediate target is sent, 0.5 s is a good default, see notes),
+and **Controller reports every** (how often the firmware prints a status line,
+i.e. one CSV row; 50–5000 ms, default 100 ms; sent to the board as `R<ms>` on
+connect and whenever changed, the value the board confirms is shown next to it).
 
 ### 2. CSV logging
 * Choose a **Folder** and a **File prefix**. Files are named
@@ -152,7 +155,7 @@ settings for next time.
 | `log_elapsed_s` | Seconds since this file was opened. |
 | `run_elapsed_s` | Seconds since **Start ramp** was pressed (blank before any run). |
 | `controller_time_s` | The Arduino's own clock (`millis()`/1000) when it printed the line. Independent of PC latency; **use this as the time axis**. |
-| `controller_rpm_time_s` | Arduino clock of the last RPM calculation. RPM updates every 0.25 s, so rows sharing this value repeat the same measurement. |
+| `controller_rpm_time_s` | Arduino clock of the last RPM calculation. RPM updates every 0.1 s, so rows sharing this value repeat the same measurement. |
 | `phase` | `idle`, `ramping`, `holding`, `finished` or `stopped`. |
 | `commanded_rpm` | Last target sent by this program. |
 | `controller_target_rpm` | Target the Arduino reports it is using. |
@@ -164,9 +167,11 @@ settings for next time.
 | `controller_setpoint_rpm`, `encoder_rpm`, `feedforward_percent`, `d_rpm_s`, `hold`, `open_loop` | Extra fields from newer firmware; blank if the sketch does not report them. |
 
 One row is written per status line from the controller. The firmware prints a
-line every 0.5 s and one more after every command it receives (`T`, `?`), so
-row spacing is not uniform; use `controller_time_s` as the time axis and drop
-rows that share a `controller_rpm_time_s` if you want one row per measurement.
+line every *Controller reports every* interval (default 100 ms) and one more
+after every command it receives (`T`, `?`, `R`), so row spacing is not perfectly
+uniform; use `controller_time_s` as the time axis and drop rows that share a
+`controller_rpm_time_s` if you want one row per measurement. The RPM value is
+recomputed every 100 ms as a 1 s moving average.
 
 ## 5. Notes and limits
 

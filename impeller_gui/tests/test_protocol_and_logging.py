@@ -112,6 +112,18 @@ class SimulatorTests(unittest.TestCase):
 
         link._write_line("T9999")
         self.assertIn("ERR use T0-T1200", link.poll())
+
+        link.set_status_interval_ms(500)
+        link.poll()
+        self.assertEqual(link.status.fields["status_ms"], 500.0)
+        t0 = time.monotonic()
+        count = 0
+        while time.monotonic() - t0 < 1.2:
+            count += sum(1 for line in link.poll() if line.startswith("OK"))
+            time.sleep(0.02)
+        self.assertTrue(1 <= count <= 3, count)  # ~2 periodic lines per second at R500
+        with self.assertRaises(ValueError):
+            link.set_status_interval_ms(10)
         link.disconnect()
         self.assertFalse(link.is_connected)
 
